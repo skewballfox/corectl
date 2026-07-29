@@ -1,0 +1,31 @@
+[Unit]
+Description=PulseAudio server for Wolf/Games On Whales
+After=network-online.target podman.socket
+Requires=podman.socket
+
+[Service]
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+
+[Container]
+AutoUpdate=registry
+ContainerName=%p
+HostName=%p
+Image=ghcr.io/games-on-whales/pulseaudio:master
+
+# No network needed at all - audio moves over a unix socket/shared memory,
+# never touches a socket that needs host networking or even a bridge.
+Network=none
+
+DropCapability=ALL
+# SYS_NICE lets PA's mixing thread run at elevated scheduling priority so it
+# doesn't glitch under load. This is the only capability it needs.
+AddCapability=CAP_SYS_NICE
+
+Volume=pulse-socket-vol:/tmp/pulse
+
+Environment=PULSE_SERVER=unix:/tmp/pulse/pulse-socket
+
+[Install]
+WantedBy=default.target

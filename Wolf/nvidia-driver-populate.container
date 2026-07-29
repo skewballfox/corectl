@@ -1,0 +1,18 @@
+# nvidia-driver-populate.container
+[Unit]
+Description=Populate NVIDIA driver volume for Wolf
+Requires=nvidia-driver.volume
+After=nvidia-driver.volume
+
+[Container]
+ContainerName=%p
+Image=gow/nvidia-driver:latest
+Exec=sh
+Volume=nvidia-driver-vol:/usr/nvidia
+
+[Service]
+Restart=no
+RemainAfterExit=yes
+
+[Install]
+WantedBy=default.target

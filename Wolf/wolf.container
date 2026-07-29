@@ -1,0 +1,52 @@
+[Unit]
+Description=Wolf / Games On Whales
+Requires=network-online.target podman.socket pulseaudio.service nvidia-driver-populate.service
+After=network-online.target podman.socket pulseaudio.service nvidia-driver-populate.service
+BindsTo=pulseaudio.service
+
+
+[Service]
+TimeoutStartSec=900
+ExecStartPre=-/usr/bin/podman rm --force WolfPulseAudio
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+ExecStartPre=/usr/bin/timeout 30 /bin/sh -c 'vol=$(podman volume inspect pulse-socket-vol --format "{{.Mountpoint}}"); until test -S "$vol/pulse-socket"; do sleep 0.5; done'
+
+[Container]
+AutoUpdate=registry
+ContainerName=%p
+HostName=%p
+Image=wolf-nvidia:latest
+Network=host
+
+DropCapability=ALL
+
+PodmanArgs=--ipc=host --device-cgroup-rule "c 13:* rmw" --security-opt label=type:container_use_devices.process
+
+AddDevice=/dev/dri
+AddDevice=/dev/uinput
+AddDevice=/dev/uhid
+AddDevice=/dev/nvidia-uvm
+AddDevice=/dev/nvidia-uvm-tools
+AddDevice=/dev/nvidia-caps/nvidia-cap1
+AddDevice=/dev/nvidia-caps/nvidia-cap2
+AddDevice=/dev/nvidiactl
+AddDevice=/dev/nvidia0
+AddDevice=/dev/nvidia-modeset
+
+Volume=nvidia-driver-vol:/usr/nvidia:ro
+# Replaced /dev bind with read-only /run/udev for device discovery
+Volume=/run/udev:/run/udev:ro
+# Read-Write mount for Wolf persistent configuration
+Volume=/etc/wolf/:/etc/wolf:z
+Volume=/run/podman/podman.sock:/var/run/docker.sock:ro
+Volume=pulse-socket-vol:/tmp/pulse
+
+Environment=WOLF_STOP_CONTAINER_ON_EXIT=TRUE
+Environment=NVIDIA_DRIVER_VOLUME_NAME=nvidia-driver-vol
+Environment=WOLF_RENDER_NODE=/dev/dri/renderD129
+Environment=PULSE_SERVER=unix:/tmp/pulse/pulse-socket
+
+[Install]
+WantedBy=default.target

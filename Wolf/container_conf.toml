@@ -1,0 +1,9 @@
+[storage]
+driver = "overlay"
+# The service user maintains its own local runtime metadata/containers here:
+graphroot = "/var/home/wolf/.local/share/containers/storage"
+
+# Point to the read-only store populated by the builder:
+additionalimagestores = [
+  "/var/lib/container-stores/wolf"
+]
