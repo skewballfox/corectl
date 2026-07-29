@@ -18,11 +18,8 @@ build-containers tag="wolf-nvidia:latest" version="" base_image="ghcr.io/games-o
     #!/usr/bin/env bash
     cd {{ module_directory() }}
     NV_VER="{{ version }}"
+    
     # Detect NVIDIA driver version on host
-    NV_VER=$(cat /proc/driver/nvidia/version 2>/dev/null | head -n1 | grep -oP 'Kernel Module\s+\K[0-9.]+' \
-      || nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null \
-      || cat /sys/module/nvidia/version 2>/dev/null)
-
     if [ -z "$NV_VER" ]; then
         NV_VER=$(cat /proc/driver/nvidia/version 2>/dev/null | head -n1 | grep -oP 'Kernel Module\s+\K[0-9.]+' \
       || nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null \
