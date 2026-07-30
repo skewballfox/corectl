@@ -1,5 +1,7 @@
 
 set dotenv-load := true
+set allow-duplicate-variables
+
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
 import 'common.just'
