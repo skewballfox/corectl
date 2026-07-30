@@ -15,14 +15,13 @@ _restore-selinux USER:
         echo "Applying SELinux security context to $targetdir..."
         {{ auth }} restorecon -R "$target_dir"
     fi
-_create-build-cache quadlet USER:
+_setup-quadlet quadlet USER:
     #!/usr/bin/env bash
-    if [ "{{ quadlet }}" = "true" ] && ; then
-        echo "Configuring firewalld service: {{ USER }}..."
+    if [ "{{ quadlet }}" == "true" ] && [ -d "/var/home/{{ USER }}" ]; then
+        echo "Configuring quadlet service: {{ USER }}..."
         id -u secure-build >/dev/null 2>&1 || ( echo "run just builder::setup first" && exit 0)
-            {{ auth }} loginctl enable-linger wolf
-            just create-container-cache {{ USER }}
-        fi 
+        just create-container-cache {{ USER }}
+        {{ auth }} loginctl enable-linger {{ USER }}
     fi
 [arg('groups', multiple, short="g", long="group")]
 [arg('homedir', short="d", long="create-homedir", value="true")]
@@ -42,20 +41,20 @@ create-sys-user USER groups=[] homedir="" quadlet="" :
             {{ auth }} usermod -aG "$GROUP_LIST" "{{ USER }}"
         fi
         # Ensure home dir exists if user existed but home was missing
-        if [ "{{ homedir }}" = "true" ] && [ ! -d "/var/home/{{ USER }}" ]; then
+        if [ "{{ homedir }}" = "true" ] && [ -d "/var/home/{{ USER }}" ]; then
             echo "Creating missing home directory /var/home/{{ USER }}..."
             {{ auth }} mkdir -p "/var/home/{{ USER }}"
             {{ auth }} chown -R "{{ USER }}:{{ USER }}" "/var/home/{{ USER }}"
             just _restore-selinux {{ USER }}
-            just _create-build-cache {{ quadlet }} {{ USER }}
+            
         fi
-        
+        [ "{{ homedir }}" = "true" ] && just _setup-quadlet {{ quadlet }} {{ USER }} || true
         exit 0
     fi
 
     # User does not exist, assemble useradd arguments
     echo "Creating system user '{{ USER }}'..."
-    args=("-r" "--shell" "/usr/sbin/nologin" --comment "System service account for {{ USER }}")
+    args=("-r" "--shell" "/usr/sbin/nologin")
     
     if [ "{{ homedir }}" = "true" ]; then
         args+=("-m" "-d" "/var/home/{{ USER }}")
@@ -63,6 +62,7 @@ create-sys-user USER groups=[] homedir="" quadlet="" :
     if [ -n "$GROUP_LIST" ]; then
         args+=("-G" "$GROUP_LIST")
     fi
+    echo "${args[@]}"
     {{ auth }} --via-shell useradd "${args[@]}" "{{ USER }}"
     
     
