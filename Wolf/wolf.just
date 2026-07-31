@@ -13,11 +13,20 @@ setup-firewall:
         -t 47984 -t 47989 -t 48010 \
         -u 47999 -u 48100 -u 48200
 
+sign-container tag sign_priv_path=sign_priv:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    
+    # Sign local container image using key file or tpm engine
+    {{ auth }} podman image sign \
+        --sign-by-sigstore-private-key "{{ sign_priv_path }}" \
+        "containers-storage:{{ tag }}"
 # Build local Wolf container with host NVIDIA driver injection
 build-containers tag="wolf-nvidia:latest" version="" base_image="ghcr.io/games-on-whales/gstreamer:1.26.7":
     #!/usr/bin/env bash
     cd {{ module_directory() }}
     NV_VER="{{ version }}"
+    DEST_ROOT="{{ container-store }}/wolf"
     
     # Detect NVIDIA driver version on host
     if [ -z "$NV_VER" ]; then
@@ -29,14 +38,17 @@ build-containers tag="wolf-nvidia:latest" version="" base_image="ghcr.io/games-o
     {{ auth }} podman image trust set -t accept {{ base_image }}
     echo "Detected host NVIDIA driver version: $NV_VER"
 
-    {{ auth }} podman build -t gow/nvidia-driver:latest -f nvidia-driver.Dockerfile \
-        --build-arg NV_VERSION=$(cat /sys/module/nvidia/version) .
-    # Build container using local Dockerfile context
-    {{ auth }} podman build \
-        q \
-        --build-arg BASE_IMAGE="{{ base_image }}" \
-        --build-arg NV_VERSION="$NV_VER" \
-        -t {{ tag }} .
+    just build-and-sign \
+        gow/nvidia-driver:latest \
+        -f "nvidia-driver.Dockerfile" \
+        -o "$DEST_ROOT" \
+        -b "NV_VERSION=$NV_VER" \
+
+    just build-and-sign \
+        {{ tag }} \
+        -b BASE_IMAGE="{{ base_image }}"\
+        -o "$DEST_ROOT"
+    
 
     
 # Deploy Quadlets to /var/home/wolf systemd directory
