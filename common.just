@@ -3,18 +3,22 @@ set lists
 
 os_id := shell('grep -E "^(ID|VARIANT_ID)=" /etc/os-release 2>/dev/null | tr "\n" " "')
 # Auth will be run0 on secureblue (server) and sudo otherwise
-auth := if os_id=~"secureblue" { "run0 --via-shell" } else { "sudo" }
-
+auth := if os_id=~"secureblue" { "run0" } else { "sudo" }
+auth_shell := if os_id=~"secureblue" { "run0 --via-shell" } else { "sudo" }
 # secure-build base dir
 secure_build_dir := "/var/lib/secure-build"
 
 # directory for the signing key for locally built containers
 pki_dir := secure_build_dir + "/pki"
 
-#pkcs11_store := pki_dir + "/pkcs11"
-#pkcs11_pin   := pki_dir + "/pkcs11.pin"
+pkcs11_store := pki_dir + "/pkcs11"
+pkcs11_pin   := pki_dir + "/pkcs11.pin"
 # the top-level directory for builds by the secure-build user
 container-store := secure_build_dir + "/containers"
+
+# persistent TPM handle for the primary key (required so tpm2_ptool link
+# can trust it as a parent — see [INTEROPERABILITY.md](https://github.com/tpm2-software/tpm2-pkcs11/blob/master/docs/INTEROPERABILITY.md))
+primary_handle := "0x81000001"
 
 # primary key context location
 primary_ctx := pki_dir + "/primary.ctx"
@@ -27,6 +31,8 @@ sign_priv   := pki_dir + "/sign.priv"
 # exported PEM for podman policy.json
 sign_pem    := pki_dir + "/secure-build.pem"  # exported PEM for policy.json
 
+# cosign binary
+cosign_exe := '/home/linuxbrew/.linuxbrew/bin/cosign'
 
 # standard location for container related pub keys
 containers_pki_dir := "/etc/pki/containers"
@@ -223,17 +229,12 @@ create-container-cache user:
 build-and-sign tag dockerfile="Dockerfile" build-args=[] out-dir="" extra_flags="" sign_priv_path=sign_priv:
     #!/usr/bin/env bash
     set -euo pipefail
-
-    echo "==> Constructing build args for {{ tag }}..."
-    podman_args=()
-
     [ ! -z "{{ out-dir }}" ] &&  [ -d "{{ out-dir }}" ] || (echo "create target directory first" && exit 1)
-
-    FULL_TAG="{{ tag }}"
-    if [[ "$FULL_TAG" != *"/"* ]] || [[ "$FULL_TAG" != *"."*/* ]]; then
-        FULL_TAG="localhost/$FULL_TAG"
-    fi
     
+    podman_args=()  
+    oci_tag=$(echo "{{ tag }}" | tr '/:' '--')
+    STAGE_DIR=$(mktemp -d)
+
     # Iterate over the space-separated string provided by just's array interpolation
     for arg in {{ build-args }}; do
         if [ -n "$arg" ]; then
@@ -246,27 +247,29 @@ build-and-sign tag dockerfile="Dockerfile" build-args=[] out-dir="" extra_flags=
     trap 'rm -f "$BUILD_POLICY"' EXIT
     echo '{"default": [{"type": "insecureAcceptAnything"}]}' > "$BUILD_POLICY"
 
-    echo "==> Building container: $FULL_TAG"
-    {{ auth }} podman build \
-        --signature-policy "$BUILD_POLICY" \
-        -f "{{ dockerfile }}" \
-        -t "$FULL_TAG" \
-        "${podman_args[@]}" \
-        {{ extra_flags }} \
-        .
+    echo "==> Building container: {{ tag }}"
+    IIDFILE=$(mktemp)
+    podman build \
+    --signature-policy "$BUILD_POLICY" \
+    -f "{{ dockerfile }}" \
+    -t "{{ tag }}" \
+    "${podman_args[@]}" \
+    {{ extra_flags }} \
+    --iidfile "$IIDFILE" \
+    .
 
-    echo "==> Signing image in local storage: $FULL_TAG"
-    {{ auth }} podman image sign \
-        --sign-by "{{ sign_priv_path }}" \
-        "containers-storage:$FULL_TAG"
-
-    if [ -n "{{ out-dir }}" ]; then
-        echo "==> Exporting signed image to {{ out-dir }}..."
-        {{ auth }} mkdir -p "{{ out-dir }}"
-        
-        # Saves image + signatures in standard OCI format to target directory
-        {{ auth }} podman save \
-            --format oci-dir \
-            -o "{{ out-dir }}" \
-            "{{ tag }}"
-    fi
+    IMAGE_ID=$(cat "$IIDFILE" | sed 's/^sha256://')
+    rm -f "$IIDFILE"
+    # {{ auth }} skopeo copy --policy "$BUILD_POLICY" "containers-storage:@$IMAGE_ID" "oci:$STAGE_DIR:{{ tag }}"
+    
+    USERPIN=$( cat "{{ pkcs11_pin }}")
+    echo "==> Exporting and signing image to {{ out-dir }}..."
+    TPM2_PKCS11_STORE="{{ pkcs11_store }}" COSIGN_PASSWORD="$USERPIN" {{ cosign_exe }} sign-blob \
+    --yes \
+    --key "pkcs11:token=secure-build;object=secure-build-signing;type=private" \
+    --output-signature "$STAGE_DIR/manifest.sig" \
+    "$STAGE_DIR/manifest.digest"
+    {{ auth }} skopeo copy \
+        --policy "$BUILD_POLICY" \
+        "oci:$STAGE_DIR:{{ tag }}" \
+        "containers-storage:{{ tag }}"

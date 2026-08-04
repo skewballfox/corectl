@@ -1,26 +1,30 @@
 import '../common.just'
 
 
-# Generate the primary context only if it doesn't already exist
+# Generate the persistent primary key handle only if it doesn't already exist
 [private]
-ensure-primary primary_ctx_path:
+ensure-primary primary_handle:
     #!/usr/bin/env bash
-    if [ ! -f "{{primary_ctx_path}}" ]; then \
-        echo "Primary key context not found. Generating..."; \
-        tpm2_createprimary -C o -c "{{primary_ctx_path}}"; \
-    else \
-        echo "Primary key context already exists at {{primary_ctx_path}}."; \
+    set -euo pipefail
+    if tpm2_getcap handles-persistent | grep -qi "{{primary_handle}}"; then
+        echo "Persistent primary already exists at {{primary_handle}}."
+    else
+        echo "Persistent primary not found. Generating..."
+        TMP_CTX=$(mktemp)
+        tpm2_createprimary -C o -c "$TMP_CTX"
+        {{ auth }} tpm2_evictcontrol -C o -c "$TMP_CTX" "{{primary_handle}}"
+        rm -f "$TMP_CTX"
     fi
 
-generate-key primary_ctx_path=primary_ctx sign_ctx_path=sign_ctx sign_pub_path=sign_pub sign_priv_path=sign_priv sign_pem_path=sign_pem: (ensure-primary primary_ctx_path)
+generate-key primary_handle=primary_handle sign_ctx_path=sign_ctx sign_pub_path=sign_pub sign_priv_path=sign_priv sign_pem_path=sign_pem: (ensure-primary primary_handle)
     #!/usr/bin/env bash
     if [ ! -f "{{sign_ctx_path}}" ]; then \
         echo "Generating ECC signing key..."; \
-        tpm2_create -C "{{primary_ctx_path}}" \
-            -G ecc256:ecdsa-sha256:null \
-            -a "fixedtpm|fixedparent|sensitivedataorigin|userwithauth|restricted|sign" \
+        tpm2_create -C "{{primary_handle}}" \
+            -G ecc256:null \
+            -a "fixedtpm|fixedparent|sensitivedataorigin|userwithauth|sign" \
             -u "{{sign_pub_path}}" -r "{{sign_priv_path}}"; \
-        tpm2_load -C "{{primary_ctx_path}}" -u "{{sign_pub_path}}" -r "{{sign_priv_path}}" -c "{{sign_ctx_path}}";
+        tpm2_load -C "{{primary_handle}}" -u "{{sign_pub_path}}" -r "{{sign_priv_path}}" -c "{{sign_ctx_path}}";
     else \
         echo "Signing key context already exists at {{sign_ctx_path}}."; \
     fi
@@ -69,12 +73,54 @@ revoke-key:
         echo "No policy.json found; nothing to revoke."
     fi
 
-# Force regeneration of all keys: revoke the old key's trust, delete
-# existing context/blob files, generate a fresh key, and re-enroll it.
-regenerate primary_ctx_path=primary_ctx sign_ctx_path=sign_ctx sign_pub_path=sign_pub sign_priv_path=sign_priv sign_pem_path=sign_pem: revoke-key
-    rm -f {{ primary_ctx_path }} {{ sign_ctx_path }} {{ sign_pub_path }} {{ sign_priv_path }} {{ sign_pem_path }}
-    just builder::generate-key {{ primary_ctx_path }} {{ sign_ctx_path }} {{ sign_pub_path }} {{ sign_priv_path }}
-    just builder::enroll-key {{ sign_ctx_path }} {{ sign_pem_path }}
+[private]
+setup-pkcs11-token primary_handle=primary_handle sign_pub_path=sign_pub sign_priv_path=sign_priv pin_path=pkcs11_pin store_path=pkcs11_store:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    {{ auth }} mkdir -m 750 -p "{{ store_path }}"
+
+    if [ ! -f "{{ pin_path }}" ]; then
+        echo "Generating PKCS11 token PINs..."
+        USERPIN=$(openssl rand -hex 16)
+        SOPIN=$(openssl rand -hex 16)
+        printf 'USERPIN=%s\nSOPIN=%s\n' "$USERPIN" "$SOPIN" | {{ auth }} tee "{{ pin_path }}" > /dev/null
+        {{ auth }} chmod 600 "{{ pin_path }}"
+        {{ auth }} chown root:secure-build "{{ pin_path }}"
+    fi
+
+    source <({{ auth }} cat "{{ pin_path }}")
+
+    export TPM2_PKCS11_STORE="{{ store_path }}"
+
+    if [ ! -f "{{ store_path }}/tpm2_pkcs11.sqlite3" ]; then
+        PID=$(tpm2_ptool init --primary-handle="{{ primary_handle }}" --path="{{ store_path }}" | awk '/id:/ {print $2}')
+        tpm2_ptool addtoken --pid="$PID" --sopin="$SOPIN" --userpin="$USERPIN" --label=secure-build --path="{{ store_path }}"
+    else
+        echo "store/token already initialized"
+    fi
+
+    tpm2_ptool link \
+        --label=secure-build \
+        --userpin="$USERPIN" \
+        --key-label=secure-build-signing \
+        --path="{{ store_path }}" \
+        "{{ sign_pub_path }}" "{{ sign_priv_path }}"
+
+regenerate primary_handle=primary_handle sign_ctx_path=sign_ctx sign_pub_path=sign_pub sign_priv_path=sign_priv sign_pem_path=sign_pem sign_pem_link_path=sign_pem_link: revoke-key
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    echo "Evicting persistent primary at {{ primary_handle }} (if present)..."
+    {{ auth }} tpm2_evictcontrol -C o "{{ primary_handle }}" 2>/dev/null || echo "no persistent primary to evict"
+
+    rm -f "{{ sign_ctx_path }}" "{{ sign_pub_path }}" "{{ sign_priv_path }}" "{{ sign_pem_path }}"
+    {{ auth }} rm -rf "{{ pkcs11_store }}" "{{ pkcs11_pin }}"
+    {{ auth }} rm -f "{{ sign_pem_link_path }}"
+
+    just builder::generate-key "{{ primary_handle }}" "{{ sign_ctx_path }}" "{{ sign_pub_path }}" "{{ sign_priv_path }}"
+    just builder::setup-pkcs11-token "{{ primary_handle }}" "{{ sign_pub_path }}" "{{ sign_priv_path }}"
+    just builder::enroll-key "{{ sign_ctx_path }}" "{{ sign_pem_path }}" "{{ sign_pem_link_path }}"
 
 setup-user container-storage=container-store:
     #!/usr/bin/env bash
@@ -83,4 +129,4 @@ setup-user container-storage=container-store:
     {{ auth }} chmod 700 {{ pki_dir }}
     {{ auth }} mkdir -m 700 -p {{ container-storage }}
 
-setup: setup-user (generate-key) enroll-key
+setup: setup-user (generate-key) enroll-key setup-pkcs11-token
