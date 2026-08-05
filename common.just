@@ -229,47 +229,75 @@ create-container-cache user:
 build-and-sign tag dockerfile="Dockerfile" build-args=[] out-dir="" extra_flags="" sign_priv_path=sign_priv:
     #!/usr/bin/env bash
     set -euo pipefail
-    [ ! -z "{{ out-dir }}" ] &&  [ -d "{{ out-dir }}" ] || (echo "create target directory first" && exit 1)
+    [ ! -z "{{ out-dir }}" ] && [ -d "{{ out-dir }}" ] || (echo "create target directory first" && exit 1)
     
     podman_args=()  
-    oci_tag=$(echo "{{ tag }}" | tr '/:' '--')
     STAGE_DIR=$(mktemp -d)
+    BUILD_POLICY=$(mktemp)
+    # Normalize tag to have localhost/ prefix to avoid docker.io short-name expansion in cosign
+    FULL_TAG="localhost/$(echo "{{ tag }}" | sed -E 's|^localhost/||')"
+    # Clean up both temporary files AND temporary staging directory properly
+    trap 'rm -f "$BUILD_POLICY"; rm -rf "$STAGE_DIR"' EXIT
 
-    # Iterate over the space-separated string provided by just's array interpolation
     for arg in {{ build-args }}; do
         if [ -n "$arg" ]; then
             podman_args+=("--build-arg" "$arg")
         fi
     done
 
-    # 1. Create a transient permissive policy file strictly for the build process
-    BUILD_POLICY=$(mktemp)
-    trap 'rm -f "$BUILD_POLICY"' EXIT
+    # Create transient policy file for build/copy operations
     echo '{"default": [{"type": "insecureAcceptAnything"}]}' > "$BUILD_POLICY"
 
     echo "==> Building container: {{ tag }}"
     IIDFILE=$(mktemp)
     podman build \
-    --signature-policy "$BUILD_POLICY" \
-    -f "{{ dockerfile }}" \
-    -t "{{ tag }}" \
-    "${podman_args[@]}" \
-    {{ extra_flags }} \
-    --iidfile "$IIDFILE" \
-    .
+        --signature-policy "$BUILD_POLICY" \
+        -f "{{ dockerfile }}" \
+        -t "{{ tag }}" \
+        "${podman_args[@]}" \
+        {{ extra_flags }} \
+        --iidfile "$IIDFILE" \
+        .
 
     IMAGE_ID=$(cat "$IIDFILE" | sed 's/^sha256://')
     rm -f "$IIDFILE"
-    # {{ auth }} skopeo copy --policy "$BUILD_POLICY" "containers-storage:@$IMAGE_ID" "oci:$STAGE_DIR:{{ tag }}"
-    
-    USERPIN=$( cat "{{ pkcs11_pin }}")
-    echo "==> Exporting and signing image to {{ out-dir }}..."
-    TPM2_PKCS11_STORE="{{ pkcs11_store }}" COSIGN_PASSWORD="$USERPIN" {{ cosign_exe }} sign-blob \
-    --yes \
-    --key "pkcs11:token=secure-build;object=secure-build-signing;type=private" \
-    --output-signature "$STAGE_DIR/manifest.sig" \
-    "$STAGE_DIR/manifest.digest"
-    {{ auth }} skopeo copy \
+
+    USERPIN=$(cat "{{ pkcs11_pin }}")
+
+    # Clean image name for generating bundle filenames safely
+    SAFE_TAG_NAME=$(echo "{{ tag }}" | tr '/:' '_')
+    BUNDLE_PATH="{{ out-dir }}/${SAFE_TAG_NAME}.bundle"
+
+    # Ensure full output target path exists before running skopeo
+    TARGET_OCI_DIR="{{ out-dir }}/{{ tag }}"
+    mkdir -p "$(dirname "$TARGET_OCI_DIR")"
+
+    echo "==> Staging image to OCI dir..."
+    skopeo copy \
         --policy "$BUILD_POLICY" \
-        "oci:$STAGE_DIR:{{ tag }}" \
-        "containers-storage:{{ tag }}"
+        "containers-storage:$FULL_TAG" \
+        "oci:$TARGET_OCI_DIR"
+
+    # Extract the exact manifest digest (e.g., sha256:4f45966b...)
+    RAW_DIGEST=$(podman image inspect "$FULL_TAG" --format '{{{{.Digest}}')
+
+    # Convert digest format for Sigstore directory (sha256: -> sha256=)
+    IMAGE_DIGEST=$(echo "$RAW_DIGEST" | tr ':' '=')
+
+    # Absolute path to the OCI directory
+    ABS_TARGET_OCI_DIR=$(realpath "$TARGET_OCI_DIR")
+    # Sign explicitly using the image ID reference in containers-storage
+    echo "==> Signing image and producing Cosign bundle..."
+    TPM2_PKCS11_STORE="{{ pkcs11_store }}" COSIGN_PASSWORD="$USERPIN" {{ cosign_exe }} sign \
+        --yes \
+        --key "pkcs11:token=secure-build;object=secure-build-signing;type=private" \
+        --bundle "$BUNDLE_PATH" \
+        --upload=false \
+        "oci:${ABS_TARGET_OCI_DIR}@${RAW_DIGEST}"
+
+    # Extract digest to store bundle for containers-storage verification
+    IMAGE_DIGEST=$(podman image inspect "{{ tag }}" --format '{{{{.Digest}}}}' | tr ':' '=')
+    SIG_STORE_DIR="/var/lib/containers/sigstore/@${IMAGE_DIGEST}"
+    
+    {{ auth }} mkdir -p "$SIG_STORE_DIR"
+    {{ auth }} cp "$BUNDLE_PATH" "$SIG_STORE_DIR/signature-1"
