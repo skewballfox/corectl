@@ -1,8 +1,7 @@
-import '../common.just'
+import? '../common.just'
 
 setup-user:
     #!/usr/bin/env bash
-    just ensure-groups render input video
     just create-sys-user wolf -g render -g input -g video -d -q
 
 

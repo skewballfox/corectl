@@ -5,13 +5,22 @@ os_id := shell('grep -E "^(ID|VARIANT_ID)=" /etc/os-release 2>/dev/null | tr "\n
 # Auth will be run0 on secureblue (server) and sudo otherwise
 auth := if os_id=~"secureblue" { "run0" } else { "sudo" }
 auth_shell := if os_id=~"secureblue" { "run0 --via-shell" } else { "sudo" }
+
+auth_as(target_user) := if auth == "run0" {
+    "run0 -u " + target_user 
+} else {
+    "sudo -u " + target_user
+}
+
+
 # secure-build base dir
 secure_build_dir := "/var/lib/secure-build"
+secure_build_home := "/var/home/secure-build"
 
 # directory for the signing key for locally built containers
 pki_dir := secure_build_dir + "/pki"
 
-pkcs11_store := pki_dir + "/pkcs11"
+pkcs11_store := secure_build_home + "/.tpm2_pkcs11"
 pkcs11_pin   := pki_dir + "/pkcs11.pin"
 # the top-level directory for builds by the secure-build user
 container-store := secure_build_dir + "/containers"
@@ -45,6 +54,42 @@ policy_path := "/etc/containers/policy.json"
 # the location for configuration for the system users running quadlets
 user_storage := ".config/containers/storage.conf"
 
+# gnupg home used by the secure-build user for the TPM-backed signing identity
+gnupg_home := secure_build_home + "/.gnupg"
+
+key_pub_path := pki_dir + "/secure-build.pub"
+
+gpg_pub_link_path := containers_pki_dir + "/GPG-KEY-secure-build"
+
+# self-signed cert written onto the PKCS11 token (required by gnupg-pkcs11-scd,
+# which reads the public key from the certificate, not the raw key object)
+sign_cert := pki_dir + "/secure-build-signing-cert.pem"
+
+# exported binary OpenPGP keyring used as policy.json's GPGKeys keyPath
+sign_keyring := pki_dir + "/secure-build.gpg"
+
+# file recording the enrolled GPG key id, written by export-gpg-key
+signing_key_id_path := pki_dir + "/signing-key-id"
+
+# gnupg-pkcs11-scd needs to be told which PKCS11 object plays the "signature"
+# role in its OpenPGP-card emulation. This value is discovered once (it's
+# derived from the key on the token, not a secret) and cached to a file so
+# later recipes don't need a live SCD LEARN round-trip.
+signing_key_hash_path := pki_dir + "/signing-key-hash"
+
+
+build_env := "TPM2_PKCS11_TCTI=device:/dev/tpmrm0 " + \
+           "TPM2_PKCS11_BACKEND=esysdb " + \
+           "TPM2_PKCS11_LOG_LEVEL=2"
+
+# Pre-check: Enforce that the current recipe executes as the expected user
+[private]
+require-user target_user:
+    @if [ "$(whoami)" != "{{ target_user }}" ]; then \
+        echo "Error: Recipe must be run as '{{ target_user }}' (currently running as: $(whoami))." >&2; \
+        exit 1; \
+    fi
+
 # Private helper recipe to restore SELinux context safely
 _restore-selinux USER:
     #!/usr/bin/env bash
@@ -53,10 +98,10 @@ _restore-selinux USER:
         echo "Applying SELinux security context to $targetdir..."
         {{ auth }} restorecon -R "$target_dir"
     fi
-_setup-quadlet quadlet USER:
+_setup-linger quadlet USER:
     #!/usr/bin/env bash
     if [ "{{ quadlet }}" == "true" ] && [ -d "/var/home/{{ USER }}" ]; then
-        echo "Configuring quadlet service: {{ USER }}..."
+        echo "Configuring lingering for: {{ USER }}..."
         id -u secure-build >/dev/null 2>&1 || ( echo "run just builder::setup first" && exit 0)
         just create-container-cache {{ USER }}
         {{ auth }} loginctl enable-linger {{ USER }}
@@ -64,7 +109,7 @@ _setup-quadlet quadlet USER:
 [arg('groups', multiple, short="g", long="group")]
 [arg('homedir', short="d", long="create-homedir", value="true")]
 [arg('quadlet', short="q", long="enable-quadlets", value="true")]
-create-sys-user USER groups=[] homedir="" quadlet="" : 
+create-sys-user USER groups=[] homedir="" quadlet="" : (ensure-groups groups)
     #!/usr/bin/env bash
     # Convert space-separated group string to comma-separated list for useradd/usermod
     GROUP_LIST=$(echo "{{ groups }}" | tr ' ' ',')
@@ -76,17 +121,18 @@ create-sys-user USER groups=[] homedir="" quadlet="" :
         # Ensure existing user has all required supplementary groups appended
         if [ -n "$GROUP_LIST" ]; then
             echo "Updating supplementary groups for '{{ USER }}' ($GROUP_LIST)..."
-            {{ auth }} usermod -aG "$GROUP_LIST" "{{ USER }}"
+            {{ auth_shell }} usermod -aG "$GROUP_LIST" "{{ USER }}"
         fi
+        echo {{ homedir }}
         # Ensure home dir exists if user existed but home was missing
-        if [ "{{ homedir }}" = "true" ] && [ -d "/var/home/{{ USER }}" ]; then
+        if [ "{{ homedir }}" = "true" ] && [ ! -d "/var/home/{{ USER }}" ]; then
             echo "Creating missing home directory /var/home/{{ USER }}..."
             {{ auth }} mkdir -p "/var/home/{{ USER }}"
             {{ auth }} chown -R "{{ USER }}:{{ USER }}" "/var/home/{{ USER }}"
             just _restore-selinux {{ USER }}
             
         fi
-        [ "{{ homedir }}" = "true" ] && just _setup-quadlet {{ quadlet }} {{ USER }} || true
+        [ "{{ homedir }}" = "true" ] && just _setup-linger {{ quadlet }} {{ USER }} || true
         exit 0
     fi
 
@@ -110,6 +156,7 @@ create-sys-user USER groups=[] homedir="" quadlet="" :
         {{ auth }} chown -R "{{ USER }}:{{ USER }}" "/var/home/{{ USER }}"
         just _create-build-cache {{ quadlet }} {{ USER }}
         just _restore-selinux {{ USER }}
+        just _setup-linger {{ quadlet }} {{ USER }}
     fi
 
     
@@ -220,13 +267,83 @@ create-container-cache user:
     {{ auth }} mkdir -m 750 -p {{ container-store }}/{{ user }}
     {{ auth }} chown -R secure-build:{{ user }} {{ container-store }}/{{ user }}
 
+
+# Stages the built image into an OCI dir and signs it with cosign against
+# the PKCS11-backed key. Not shareable with other signing backends: cosign's
+# digest handling and bundle format are specific to it.
+[private]
+[no-cd]
+sign-cosign full_tag out-dir tag sign_priv_path=sign_priv:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    BUILD_POLICY=$(mktemp)
+    trap 'rm -f "$BUILD_POLICY"' EXIT
+    echo '{"default": [{"type": "insecureAcceptAnything"}]}' > "$BUILD_POLICY"
+
+    SAFE_TAG_NAME=$(echo "{{ tag }}" | tr '/:' '_')
+    BUNDLE_PATH="{{ out-dir }}/${SAFE_TAG_NAME}.bundle"
+    TARGET_OCI_DIR="{{ out-dir }}/{{ tag }}"
+    mkdir -p "$(dirname "$TARGET_OCI_DIR")"
+
+    echo "==> Staging image to OCI dir..."
+    skopeo copy \
+        --policy "$BUILD_POLICY" \
+        "containers-storage:{{ full_tag }}" \
+        "oci:$TARGET_OCI_DIR"
+
+    RAW_DIGEST=$(podman image inspect "{{ full_tag }}" --format '{{{{.Digest}}}}')
+    ABS_TARGET_OCI_DIR=$(realpath "$TARGET_OCI_DIR")
+    USERPIN=$(cat "{{ pkcs11_pin }}")
+
+    echo "==> Signing image and producing Cosign bundle..."
+    TPM2_PKCS11_STORE="{{ pkcs11_store }}" COSIGN_PASSWORD="$USERPIN" {{ cosign_exe }} sign \
+        --yes \
+        --key "pkcs11:token=secure-build;object=secure-build-signing;type=private" \
+        --bundle "$BUNDLE_PATH" \
+        --upload=false \
+        "oci:${ABS_TARGET_OCI_DIR}@${RAW_DIGEST}"
+
+    IMAGE_DIGEST=$(echo "$RAW_DIGEST" | tr ':' '=')
+    SIG_STORE_DIR="/var/lib/containers/sigstore/@${IMAGE_DIGEST}"
+    {{ auth }} mkdir -p "$SIG_STORE_DIR"
+    {{ auth }} cp "$BUNDLE_PATH" "$SIG_STORE_DIR/signature-1"
+
+# Stages and signs the built image in one step via skopeo's built-in
+# --sign-by, using the TPM-backed GPG key enrolled in export-gpg-key.
+# Uses `dir:` (not `oci:`) as the target — it's the transport with the
+# well-established local signature-alongside-image behavior for this
+# exact "no registry" pattern; verify `signature-1` actually lands next
+# to manifest.json on your skopeo version before relying on it, and add
+# an explicit registries.d lookaside pointing at this same path if it
+# doesn't (registries.d/default.yaml: sigstore: file://{{ out-dir }}).
+[private]
+[no-cd]
+sign-gpg full_tag out-dir tag signing_key_id_path=signing_key_id_path gnupg_home=gnupg_home:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -f "{{ signing_key_id_path }}" ] || (echo "no enrolled GPG signing key found — run 'just enroll-key' or 'just setup' first" && exit 1)
+    KEYID=$(cat "{{ signing_key_id_path }}")
+
+    SAFE_TAG_NAME=$(echo "{{ tag }}" | tr '/:' '_')
+    TARGET_DIR="{{ out-dir }}/${SAFE_TAG_NAME}"
+    mkdir -p "$TARGET_DIR"
+
+    echo "==> Staging and signing image (GPG key $KEYID)..."
+    GNUPGHOME="{{ gnupg_home }}" skopeo copy \
+        --sign-by "$KEYID" \
+        "containers-storage:{{ full_tag }}" \
+        "dir:$TARGET_DIR"
+
+    ls "$TARGET_DIR"/signature-* > /dev/null 2>&1 \
+        || echo "WARNING: no signature-* file found in $TARGET_DIR — check registries.d lookaside config"
+
 # Modular helper to build and sign any container image with multi-value build-args
 [arg('build-args', multiple, short="b", long="build-arg")]
 [arg('out-dir', short="o", long="out-dir")]
 [arg('dockerfile', short="f", long="dockerfile")]
 [private]
 [no-cd]
-build-and-sign tag dockerfile="Dockerfile" build-args=[] out-dir="" extra_flags="" sign_priv_path=sign_priv:
+build-and-sign tag dockerfile="Dockerfile" build-args=[] out-dir="" extra_flags="" sign_recipe="sign-gpg":
     #!/usr/bin/env bash
     set -euo pipefail
     [ ! -z "{{ out-dir }}" ] && [ -d "{{ out-dir }}" ] || (echo "create target directory first" && exit 1)
@@ -247,9 +364,10 @@ build-and-sign tag dockerfile="Dockerfile" build-args=[] out-dir="" extra_flags=
 
     # Create transient policy file for build/copy operations
     echo '{"default": [{"type": "insecureAcceptAnything"}]}' > "$BUILD_POLICY"
-
+    chown secure-build:secure-build $BUID_POLICY
     echo "==> Building container: {{ tag }}"
     IIDFILE=$(mktemp)
+    chown secure-build:secure-build $IIDFILE
     podman build \
         --signature-policy "$BUILD_POLICY" \
         -f "{{ dockerfile }}" \
@@ -262,42 +380,4 @@ build-and-sign tag dockerfile="Dockerfile" build-args=[] out-dir="" extra_flags=
     IMAGE_ID=$(cat "$IIDFILE" | sed 's/^sha256://')
     rm -f "$IIDFILE"
 
-    USERPIN=$(cat "{{ pkcs11_pin }}")
-
-    # Clean image name for generating bundle filenames safely
-    SAFE_TAG_NAME=$(echo "{{ tag }}" | tr '/:' '_')
-    BUNDLE_PATH="{{ out-dir }}/${SAFE_TAG_NAME}.bundle"
-
-    # Ensure full output target path exists before running skopeo
-    TARGET_OCI_DIR="{{ out-dir }}/{{ tag }}"
-    mkdir -p "$(dirname "$TARGET_OCI_DIR")"
-
-    echo "==> Staging image to OCI dir..."
-    skopeo copy \
-        --policy "$BUILD_POLICY" \
-        "containers-storage:$FULL_TAG" \
-        "oci:$TARGET_OCI_DIR"
-
-    # Extract the exact manifest digest (e.g., sha256:4f45966b...)
-    RAW_DIGEST=$(podman image inspect "$FULL_TAG" --format '{{{{.Digest}}')
-
-    # Convert digest format for Sigstore directory (sha256: -> sha256=)
-    IMAGE_DIGEST=$(echo "$RAW_DIGEST" | tr ':' '=')
-
-    # Absolute path to the OCI directory
-    ABS_TARGET_OCI_DIR=$(realpath "$TARGET_OCI_DIR")
-    # Sign explicitly using the image ID reference in containers-storage
-    echo "==> Signing image and producing Cosign bundle..."
-    TPM2_PKCS11_STORE="{{ pkcs11_store }}" COSIGN_PASSWORD="$USERPIN" {{ cosign_exe }} sign \
-        --yes \
-        --key "pkcs11:token=secure-build;object=secure-build-signing;type=private" \
-        --bundle "$BUNDLE_PATH" \
-        --upload=false \
-        "oci:${ABS_TARGET_OCI_DIR}@${RAW_DIGEST}"
-
-    # Extract digest to store bundle for containers-storage verification
-    IMAGE_DIGEST=$(podman image inspect "{{ tag }}" --format '{{{{.Digest}}}}' | tr ':' '=')
-    SIG_STORE_DIR="/var/lib/containers/sigstore/@${IMAGE_DIGEST}"
-    
-    {{ auth }} mkdir -p "$SIG_STORE_DIR"
-    {{ auth }} cp "$BUNDLE_PATH" "$SIG_STORE_DIR/signature-1"
+    just  {{ sign_recipe }} "$FULL_TAG" "{{ out-dir }}" "{{ tag }}"

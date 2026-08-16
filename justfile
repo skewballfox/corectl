@@ -4,7 +4,7 @@ set allow-duplicate-variables
 
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
-import 'common.just'
+import? 'common.just'
 
 # Service Modules
 mod builder 'secure-build/builder.just'
