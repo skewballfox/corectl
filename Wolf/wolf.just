@@ -3,6 +3,7 @@ import? '../common.just'
 setup-user:
     #!/usr/bin/env bash
     just create-sys-user wolf -g render -g input -g video -d -q
+    just prepare-user-dir wolf
 
 
 # Wolf-specific recipe using the generic helper
@@ -43,10 +44,10 @@ build-containers tag="wolf-nvidia:latest" version="" base_image="ghcr.io/games-o
         -o "$DEST_ROOT" \
         -b "NV_VERSION=$NV_VER" \
 
-    just build-and-sign \
-        {{ tag }} \
-        -b BASE_IMAGE="{{ base_image }}"\
-        -o "$DEST_ROOT"
+    # just build-and-sign \
+    #     {{ tag }} \
+    #     -b BASE_IMAGE="{{ base_image }}"\
+    #     -o "$DEST_ROOT"
     
 
     

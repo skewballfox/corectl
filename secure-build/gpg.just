@@ -1,24 +1,7 @@
 import? '../common.just'
-set positional-arguments
 
-[no-cd]
-[arg('store_path', short="s", long="store-path")]
-[arg('pin_path', short="p", long="pin-path")]
-[arg('cert_path', short="c", long="cert-path")]
-[arg('pki_dir', short="k", long="pki-dir")]
-[arg('gpg_home', short="g", long="gpg-home")]
-build_cmd store_path=pkcs11_store pin_path=pkcs11_pin cert_path=sign_cert pki_dir=pki_dir gpg_home=gnupg_home *cmd:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    source <(cat "{{pin_path}}")
-    {{ auth_as("secure-build") }} env  GNUPGHOME="{{ gpg_home }}" \
-            TPM2_PKCS11_TCTI="device:/dev/tpmrm0" \
-            TPM2_PKCS11_BACKEND="esysdb" \
-            TPM2_PKCS11_LOG_LEVEL=2 \
-            GNUTLS_PIN="$USERPIN" \
-            GNUTLS_SO_PIN="$SOPIN" \
-            TPM2_PKCS11_STORE="{{store_path}}" \
-            "${@:6}"
+
+
 
 [private]
 [no-cd]
@@ -71,7 +54,7 @@ enroll-cert store_path=pkcs11_store pin_path=pkcs11_pin cert_path=sign_cert pki_
     echo module is "$MODULE"
     if [ ! -f "{{ cert_path }}" ]; then
         echo "Generating self-signed certificate for TPM key..."
-        just builder::build_cmd -s {{ store_path }} -p {{ pin_path }} -- certtool --generate-self-signed \
+        just build_cmd -s {{ store_path }} -p {{ pin_path }} -- certtool --generate-self-signed \
             --load-privkey "pkcs11:token=secure-build;object=secure-build-signing;type=private" \
             --load-pubkey "pkcs11:token=secure-build;object=secure-build-signing;type=public" \
             --template "$TEMPLATE" \
@@ -80,7 +63,7 @@ enroll-cert store_path=pkcs11_store pin_path=pkcs11_pin cert_path=sign_cert pki_
     fi
 
     echo "Writing certificate onto the PKCS11 token..."
-    just builder::build_cmd -s {{ store_path }} -p {{ pin_path }} -- p11tool --login --set-pin="$USERPIN" --write "pkcs11:token=secure-build" \
+    just build_cmd -s {{ store_path }} -p {{ pin_path }} -- p11tool --login --set-pin="$USERPIN" --write "pkcs11:token=secure-build" \
         --load-certificate "{{ cert_path }}" --label secure-build-signing
 
 # Configures gpg-agent to launch gnupg-pkcs11-scd via /usr/bin/env
@@ -127,15 +110,15 @@ map-card-key gnupg_home=gnupg_home store_path=pkcs11_store hash_path=signing_key
     {{ auth }} pkill -u secure-build -f gpg-agent || true
     {{ auth }} pkill -u secure-build -f gnupg-pkcs11-scd || true
     echo $GNUPGHOME
-    just builder::build_cmd -s {{ store_path }} -p {{ pin_path }} -g {{ gnupg_home }} -- systemctl --user set-environment TPM2_PKCS11_STORE="{{ store_path }}" TPM2_PKCS11_BACKEND="esysdb"
-    just builder::build_cmd -s {{ store_path }} -p {{ pin_path }} -g {{ gnupg_home }} -- systemctl --user restart gpg-agent
-    just builder::build_cmd -s {{ store_path }} -p {{ pin_path }} -g {{ gnupg_home }} -- gpg-connect-agent /bye
+    just build_cmd -s {{ store_path }} -p {{ pin_path }} -g {{ gnupg_home }} -- systemctl --user set-environment TPM2_PKCS11_STORE="{{ store_path }}" TPM2_PKCS11_BACKEND="esysdb"
+    just build_cmd -s {{ store_path }} -p {{ pin_path }} -g {{ gnupg_home }} -- systemctl --user restart gpg-agent
+    just build_cmd -s {{ store_path }} -p {{ pin_path }} -g {{ gnupg_home }} -- gpg-connect-agent /bye
 
-    STATUS=$(just builder::build_cmd -s {{ store_path }} -p {{ pin_path }} -g {{ gnupg_home }} -- gpg --card-status --with-colons 2>/dev/null || true)
+    STATUS=$(just build_cmd -s {{ store_path }} -p {{ pin_path }} -g {{ gnupg_home }} -- gpg --card-status --with-colons 2>/dev/null || true)
     echo $STATUS
     # Extract 40-character hex keygrip directly from grp lines
     # Query scdaemon directly for KEYPAIRINFO records returned by gnupg-pkcs11-scd
-    HASH=$(just builder::build_cmd -s {{ store_path }} -p {{ pin_path }} -g {{ gnupg_home }} -- \
+    HASH=$(just build_cmd -s {{ store_path }} -p {{ pin_path }} -g {{ gnupg_home }} -- \
         gpg-connect-agent 'SCD LEARN --force' /bye 2>/dev/null \
         | awk '/S KEYPAIRINFO/ {print $3; exit}')
 
@@ -153,12 +136,12 @@ bind-gpg-key gnupg_home=gnupg_home store_path=pkcs11_store  pin_path=pkcs11_pin:
     set -euo pipefail
     source <({{ auth }} cat "{{ pin_path }}")
 
-    if just builder::build_cmd -p {{ pin_path }} -- gpg --batch --with-colons --list-secret-keys 2>/dev/null | grep -q '^sec'; then
+    if just build_cmd -p {{ pin_path }} -- gpg --batch --with-colons --list-secret-keys 2>/dev/null | grep -q '^sec'; then
         echo "Secret key already bound; nothing to do."
         exit 0
     fi
     
-    HASH=$(just builder::build_cmd -s {{ store_path }} -p {{ pin_path }} -g {{ gnupg_home }} -- \
+    HASH=$(just build_cmd -s {{ store_path }} -p {{ pin_path }} -g {{ gnupg_home }} -- \
         gpg-connect-agent 'SCD LEARN --force' /bye 2>/dev/null \
         | awk '/S KEYPAIRINFO/ {print $3; exit}')
     echo HASH IS $HASH
@@ -181,7 +164,7 @@ bind-gpg-key gnupg_home=gnupg_home store_path=pkcs11_store  pin_path=pkcs11_pin:
         %echo done
     EOF
     {{ auth }} chown secure-build:secure-build $BATCH_FILE
-    printf '%s' "$USERPIN" | just builder::build_cmd -p {{ pin_path }} -g {{ gnupg_home }} -- \
+    printf '%s' "$USERPIN" | just build_cmd -p {{ pin_path }} -g {{ gnupg_home }} -- \
         gpg --batch --generate-key --pinentry-mode loopback --passphrase-fd 0  "$BATCH_FILE"    
     
 
@@ -192,14 +175,14 @@ export-gpg-key gnupg_home=gnupg_home sign_link_path=sign_pem_link keyring_path=s
     set -euo pipefail
     
     # Obtain Key ID from the card / scdaemon state
-     KEYID=$(just builder::build_cmd -- gpg --card-status | awk '/Key attribute/ {print $NF}' | head -n1)
+     KEYID=$(just build_cmd -- gpg --card-status | awk '/Key attribute/ {print $NF}' | head -n1)
     [ -n "$KEYID" ] || (echo "Failed to locate GPG Key ID from TPM card status" && exit 1)
 
     # Save the key ID for sign-gpg
     echo "$KEYID" > "{{ key_id_path }}"
 
     # Export public key ring for verification
-    just builder::build_cmd -- gpg --batch --yes --export "$KEYID" | {{ auth }} tee "{{ keyring_path }}" > /dev/null
+    just build_cmd -- gpg --batch --yes --export "$KEYID" | {{ auth }} tee "{{ keyring_path }}" > /dev/null
     
     {{ auth }} chmod 644 "{{ keyring_path }}"
 
@@ -214,7 +197,7 @@ export-gpg-key gnupg_home=gnupg_home sign_link_path=sign_pem_link keyring_path=s
         '.default //= [{"type": "reject"}]
          | .transports["containers-storage"][""] = [{"type": "signedBy", "keyType": "GPGKeys", "keyPath": $keypath}]' \
         "{{ policy_path }}" > "$POLICY_TMP"
-    {{ auth }} mv "$POLICY_TMP" "{{ policy_path }}"
+    {{ auth }} cp "$POLICY_TMP" "{{ policy_path }}"
 
     echo "$KEYID" | {{ auth }} tee "{{ key_id_path }}" > /dev/null
     echo "GPG key $KEYID enrolled; containers-storage now requires signedBy verification."
@@ -238,10 +221,10 @@ enroll-gpg-key key_pub_path=sign_keyring gpg_pub_link_path=gpg_pub_link_path pol
          | .transports["containers-storage"][""] = [{
              "type": "signedBy",
              "keyType": "GPGKeys",
-             "keyFiles": [$keypath]
+             "keyPath": $keypath
            }]' \
         "{{ policy_path }}" > "$POLICY_TMP"
-    {{ auth }} mv "$POLICY_TMP" "{{ policy_path }}"
+    {{ auth }} cp "$POLICY_TMP" "{{ policy_path }}"
 
     echo "GPG key enrolled at {{ gpg_pub_link_path }}; containers-storage now requires GPG signature verification."
 

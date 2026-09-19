@@ -16,7 +16,7 @@ nonexhaustive atm as I'm still adding and removing packages while I work out how
 
 ### secure-build
 
-the goal is to create a dedicated user account for building containers for other system services. It is a member of the tss group to interact with the tpm, and does require enabling user namespaces in order to build images with buildah. The built images would be signed and read only for the downstream system users, and the default policy would be to reject unsigned images. I want to try to limit the amount of privilege the accounts and their containers actually need. The service accounts will rely entirely on locally stored images, and updates will be handled via the builder account. 
+the goal is to create a dedicated user account for building containers for other system services. It is a member of the `tss` group to interact with the tpm, and does require enabling user namespaces in order to build images with buildah. The built images would be signed and read only for the downstream system users, and the default policy would be to reject unsigned images. I want to try to limit the amount of privilege the accounts and their containers actually need. The service accounts will rely entirely on locally stored images, and updates will be handled via the builder account. 
 
 Once I flesh out the build pipeline I'm planning on making something that can work with [materia](https://github.com/stryan/materia). 
 

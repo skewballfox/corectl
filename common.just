@@ -1,5 +1,6 @@
 set unstable
 set lists
+set positional-arguments
 
 os_id := shell('grep -E "^(ID|VARIANT_ID)=" /etc/os-release 2>/dev/null | tr "\n" " "')
 # Auth will be run0 on secureblue (server) and sudo otherwise
@@ -8,6 +9,12 @@ auth_shell := if os_id=~"secureblue" { "run0 --via-shell" } else { "sudo" }
 
 auth_as(target_user) := if auth == "run0" {
     "run0 -u " + target_user 
+} else {
+    "sudo -u " + target_user
+}
+
+shell_as(target_user) := if auth == "run0" {
+    "run0 --via-shell -u " + target_user 
 } else {
     "sudo -u " + target_user
 }
@@ -82,6 +89,44 @@ build_env := "TPM2_PKCS11_TCTI=device:/dev/tpmrm0 " + \
            "TPM2_PKCS11_BACKEND=esysdb " + \
            "TPM2_PKCS11_LOG_LEVEL=2"
 
+[no-cd]
+[arg('store_path', short="s", long="store-path")]
+[arg('pin_path', short="p", long="pin-path")]
+[arg('cert_path', short="c", long="cert-path")]
+[arg('pki_dir', short="k", long="pki-dir")]
+[arg('gpg_home', short="g", long="gpg-home")]
+build_cmd store_path=pkcs11_store pin_path=pkcs11_pin cert_path=sign_cert pki_dir=pki_dir gpg_home=gnupg_home *cmd:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source <(cat "{{pin_path}}")
+    {{ shell_as("secure-build") }} env  GNUPGHOME="{{ gpg_home }}" \
+            TPM2_PKCS11_TCTI="device:/dev/tpmrm0" \
+            TPM2_PKCS11_BACKEND="esysdb" \
+            TPM2_PKCS11_LOG_LEVEL=2 \
+            GNUTLS_PIN="$USERPIN" \
+            GNUTLS_SO_PIN="$SOPIN" \
+            TPM2_PKCS11_STORE="{{store_path}}" \
+            "${@:6}"
+
+[no-cd]
+[arg('store_path', short="s", long="store-path")]
+[arg('pin_path', short="p", long="pin-path")]
+[arg('cert_path', short="c", long="cert-path")]
+[arg('pki_dir', short="k", long="pki-dir")]
+[arg('gpg_home', short="g", long="gpg-home")]
+unshared_build_cmd store_path=pkcs11_store pin_path=pkcs11_pin cert_path=sign_cert pki_dir=pki_dir gpg_home=gnupg_home *cmd:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source <(cat "{{pin_path}}")
+    {{ auth_as("secure-build") }} podman unshare env  GNUPGHOME="{{ gpg_home }}" \
+            TPM2_PKCS11_TCTI="device:/dev/tpmrm0" \
+            TPM2_PKCS11_BACKEND="esysdb" \
+            TPM2_PKCS11_LOG_LEVEL=2 \
+            GNUTLS_PIN="$USERPIN" \
+            GNUTLS_SO_PIN="$SOPIN" \
+            TPM2_PKCS11_STORE="{{store_path}}" \
+            "${@:6}"
+
 # Pre-check: Enforce that the current recipe executes as the expected user
 [private]
 require-user target_user:
@@ -98,14 +143,57 @@ _restore-selinux USER:
         echo "Applying SELinux security context to $targetdir..."
         {{ auth }} restorecon -R "$target_dir"
     fi
+# One-time setup: idempotently allocate a subuid/subgid range for rootless builds
+
+ensure-subid-range user="secure-build" size="65536":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    USER_NAME="{{ user }}"
+    SIZE="{{ size }}"
+
+    # Serialize against concurrent invocations touching /etc/subuid|subgid
+    exec 9>/var/lock/subid-alloc.lock
+    flock 9
+
+    allocate() {
+        local file="$1" kind="$2"
+        if grep -qE "^${USER_NAME}:" "$file" 2>/dev/null; then
+            echo "==> ${kind} range already present for ${USER_NAME}, skipping"
+            return 0
+        fi
+
+        # Find the highest (start + count) already allocated, floor at 100000
+        local max_end=99999
+        while IFS=: read -r _ start count; do
+            [ -z "${start:-}" ] && continue
+            local end=$((start + count))
+            [ "$end" -gt "$max_end" ] && max_end=$end
+        done < "$file"
+
+        local new_start=$((max_end + 1))
+        local new_last=$((new_start + SIZE - 1))
+        echo "==> allocating ${kind} range ${new_start}-${new_last} for ${USER_NAME}"
+        usermod --add-sub${kind}s "${new_start}-${new_last}" "$USER_NAME"
+    }
+
+    allocate /etc/subuid uid
+    allocate /etc/subgid gid
+
+    echo "==> done. current ranges:"
+    grep "^${USER_NAME}:" /etc/subuid || true
+    grep "^${USER_NAME}:" /etc/subgid || true
+
 _setup-linger quadlet USER:
     #!/usr/bin/env bash
     if [ "{{ quadlet }}" == "true" ] && [ -d "/var/home/{{ USER }}" ]; then
         echo "Configuring lingering for: {{ USER }}..."
         id -u secure-build >/dev/null 2>&1 || ( echo "run just builder::setup first" && exit 0)
+        just ensure-subid-range {{ USER }}
         just create-container-cache {{ USER }}
         {{ auth }} loginctl enable-linger {{ USER }}
     fi
+
+
 [arg('groups', multiple, short="g", long="group")]
 [arg('homedir', short="d", long="create-homedir", value="true")]
 [arg('quadlet', short="q", long="enable-quadlets", value="true")]
@@ -318,24 +406,87 @@ sign-cosign full_tag out-dir tag sign_priv_path=sign_priv:
 # doesn't (registries.d/default.yaml: sigstore: file://{{ out-dir }}).
 [private]
 [no-cd]
-sign-gpg full_tag out-dir tag signing_key_id_path=signing_key_id_path gnupg_home=gnupg_home:
+sign-gpg full_tag out-dir tag signing_key_id_path=signing_key_id_path gnupg_home=gnupg_home pin_path=pkcs11_pin:
     #!/usr/bin/env bash
     set -euo pipefail
     [ -f "{{ signing_key_id_path }}" ] || (echo "no enrolled GPG signing key found — run 'just enroll-key' or 'just setup' first" && exit 1)
-    KEYID=$(cat "{{ signing_key_id_path }}")
+    
+    source <(cat "{{ pin_path }}")
+    KEYID=$(just build_cmd -- gpg --batch --with-colons --list-secret-keys \
+        | awk -F: '/^fpr:/ {print $10; exit}')
 
     SAFE_TAG_NAME=$(echo "{{ tag }}" | tr '/:' '_')
+    # apparently skopeo will refuse to write to a non-container directory so a directory per target needs to be created
     TARGET_DIR="{{ out-dir }}/${SAFE_TAG_NAME}"
     mkdir -p "$TARGET_DIR"
+    chown secure-build:wolf "$TARGET_DIR"
+    chmod 2750 "$TARGET_DIR"
+    PIN_FILE=$(mktemp)
+    POLICY_TMP=$(mktemp)
+    printf '%s\n' "$USERPIN" > "$PIN_FILE"
+    chmod 600 "$PIN_FILE"
+    chown secure-build:secure-build "$PIN_FILE"
+    trap 'rm -f "$POLICY_TMP" "$PIN_FILE"' EXIT
+    echo '{"default":[{"type":"insecureAcceptAnything"}]}' > "$POLICY_TMP"
+    chown -R secure-build:secure-build "$POLICY_TMP"
 
     echo "==> Staging and signing image (GPG key $KEYID)..."
-    GNUPGHOME="{{ gnupg_home }}" skopeo copy \
+    just unshared_build_cmd -- GNUPGHOME="{{ gnupg_home }}" skopeo copy \
+        --policy "$POLICY_TMP" \
         --sign-by "$KEYID" \
+        --sign-passphrase-file "$PIN_FILE" \
+        --sign-identity "{{ full_tag }}" \
         "containers-storage:{{ full_tag }}" \
         "dir:$TARGET_DIR"
 
+    find "$TARGET_DIR" -type f -exec chmod 640 {} +
+    find "$TARGET_DIR" -type d -exec chmod 2750 {} +
     ls "$TARGET_DIR"/signature-* > /dev/null 2>&1 \
         || echo "WARNING: no signature-* file found in $TARGET_DIR — check registries.d lookaside config"
+
+# Prepares a per-user output directory under the secure-build container
+# store: creates it if missing, grants the target user *traversal only*
+# (via setfacl, not chmod) on the intermediate dirs so listing/reading
+# still requires being inside the final subdir, and makes the final
+# subdir itself read+traverse (no write) for that user via group
+# ownership + setgid so files skopeo writes later inherit the group.
+[private]
+[no-cd]
+[arg('base_dir', short="b", long="base-dir")]
+prepare-user-dir target_user base_dir=container-store:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    USER_DIR="{{ base_dir }}/{{ target_user }}"
+
+    
+    # Grant execute-only (traverse, not list/read) on every ancestor
+    # directory from filesystem root down through base_dir, so
+    # target_user can walk down to their own subdir regardless of how
+    # deep base_dir is nested, without being able to `ls` siblings or
+    # read anything at the intermediate levels. x-only ACL entries don't
+    # expose directory contents, so this is safe to apply broadly.
+    ancestor="{{ base_dir }}"
+    dirs_to_grant=()
+    while [ "$ancestor" != "/" ] && [ -n "$ancestor" ]; do
+        dirs_to_grant+=("$ancestor")
+        ancestor=$(dirname "$ancestor")
+    done
+    # Apply root-to-leaf (reverse the collected list) so failures surface
+    # at the shallowest broken path first
+    for (( idx=${#dirs_to_grant[@]}-1 ; idx>=0 ; idx-- )); do
+        d="${dirs_to_grant[$idx]}"
+        echo "Granting traverse (x) on $d to {{ target_user }}"
+        {{ auth }} setfacl -m u:{{ target_user }}:x "$d"
+    done
+
+    # The user's own subdir: owned secure-build:target_user, setgid so
+    # files written into it later inherit group target_user, group gets
+    # read+traverse only — no write, matching "readable, not writable".
+    {{ auth }} mkdir -p "$USER_DIR"
+    {{ auth }} chown secure-build:{{ target_user }} "$USER_DIR"
+    {{ auth }} chmod 2750 "$USER_DIR"
+
+    echo "Prepared $USER_DIR (traverse-only ACL on ancestors, group-read on target)"
 
 # Modular helper to build and sign any container image with multi-value build-args
 [arg('build-args', multiple, short="b", long="build-arg")]
@@ -347,35 +498,44 @@ build-and-sign tag dockerfile="Dockerfile" build-args=[] out-dir="" extra_flags=
     #!/usr/bin/env bash
     set -euo pipefail
     [ ! -z "{{ out-dir }}" ] && [ -d "{{ out-dir }}" ] || (echo "create target directory first" && exit 1)
-    
-    podman_args=()  
-    STAGE_DIR=$(mktemp -d)
-    BUILD_POLICY=$(mktemp)
     # Normalize tag to have localhost/ prefix to avoid docker.io short-name expansion in cosign
     FULL_TAG="localhost/$(echo "{{ tag }}" | sed -E 's|^localhost/||')"
-    # Clean up both temporary files AND temporary staging directory properly
-    trap 'rm -f "$BUILD_POLICY"; rm -rf "$STAGE_DIR"' EXIT
-
+    buildah_args=()
     for arg in {{ build-args }}; do
         if [ -n "$arg" ]; then
-            podman_args+=("--build-arg" "$arg")
+            buildah_args+=("--build-arg" "$arg")
         fi
     done
-
+    
+    STAGE_DIR=$(mktemp -d)
+    BUILD_POLICY="$STAGE_DIR/policy.json"
+    IIDFILE="$STAGE_DIR/iid"
+    CONTEXT_DIR="$STAGE_DIR/context"
+    DOCKERFILE_ABS="$CONTEXT_DIR/{{ dockerfile }}"
+    trap 'rm -rf "$STAGE_DIR"' EXIT
+    
     # Create transient policy file for build/copy operations
     echo '{"default": [{"type": "insecureAcceptAnything"}]}' > "$BUILD_POLICY"
-    chown secure-build:secure-build $BUID_POLICY
-    echo "==> Building container: {{ tag }}"
-    IIDFILE=$(mktemp)
-    chown secure-build:secure-build $IIDFILE
-    podman build \
+
+    mkdir "$CONTEXT_DIR"
+    # Copy the whole context (Dockerfile + anything it COPY/ADDs), not just the Dockerfile
+    cp -a . "$CONTEXT_DIR"/
+    touch "$IIDFILE"
+    # Hand the whole staged directory over to secure-build
+    chown -R secure-build:secure-build "$STAGE_DIR"
+    
+
+    
+    just build_cmd -- buildah build \
+        --isolation chroot \
         --signature-policy "$BUILD_POLICY" \
-        -f "{{ dockerfile }}" \
+        -f "$DOCKERFILE_ABS" \
         -t "{{ tag }}" \
-        "${podman_args[@]}" \
+        "${buildah_args[@]}" \
         {{ extra_flags }} \
         --iidfile "$IIDFILE" \
-        .
+        "$CONTEXT_DIR"
+
 
     IMAGE_ID=$(cat "$IIDFILE" | sed 's/^sha256://')
     rm -f "$IIDFILE"

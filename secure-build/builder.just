@@ -98,7 +98,7 @@ setup-pkcs11-token sign_pub_path=sign_pub sign_priv_path=sign_priv pin_path=pkcs
     export TPM2_PKCS11_STORE="{{ store_path }}"
 
     if [ ! -f "{{ store_path }}/tpm2_pkcs11.sqlite3" ]; then
-        INIT_OUTPUT=$(just builder::build_cmd -p "{{ pin_path }}" -- tpm2_ptool init --path="{{ store_path }}")
+        INIT_OUTPUT=$(just build_cmd -p "{{ pin_path }}" -- tpm2_ptool init --path="{{ store_path }}")
         echo "$INIT_OUTPUT"
 
         PID=$(awk -F": " '/^id:/ {print $2}' <<< "$INIT_OUTPUT")
@@ -108,12 +108,12 @@ setup-pkcs11-token sign_pub_path=sign_pub sign_priv_path=sign_priv pin_path=pkcs
             echo "$INIT_OUTPUT" >&2
             exit 1
         fi
-        just builder::build_cmd -p "{{ pin_path }}" -- tpm2_ptool addtoken --pid="$PID" --sopin="$SOPIN" --userpin="$USERPIN" --label=secure-build --path="{{ store_path }}"
+        just build_cmd -p "{{ pin_path }}" -- tpm2_ptool addtoken --pid="$PID" --sopin="$SOPIN" --userpin="$USERPIN" --label=secure-build --path="{{ store_path }}"
     else
         echo "store/token already initialized"
     fi
 
-    just builder::build_cmd -p {{pin_path}} -- tpm2_ptool addkey \
+    just build_cmd -p {{pin_path}} -- tpm2_ptool addkey \
         --label=secure-build \
         --userpin="$USERPIN" \
         --key-label=secure-build-signing \
@@ -168,9 +168,11 @@ regenerate-gpg sign_ctx_path=sign_ctx sign_pub_path=sign_pub sign_priv_path=sign
     just builder::export-gpg-key
     just builder::enroll-gpg-key
 
+
 setup-user container-storage=container-store:
     #!/usr/bin/env bash
     just create-sys-user secure-build -g tss -d -q
+    {{ auth }} just ensure-subid-range
     {{ auth }} mkdir -p {{ pki_dir }}
     {{ auth }} mkdir -p {{ pkcs11_store }}
     {{ auth }} chown root:secure-build {{ pki_dir }}
@@ -178,5 +180,5 @@ setup-user container-storage=container-store:
     {{ auth }} mkdir -m 700 -p {{ container-storage }}
 
 #setup: setup-user (generate-key) enroll-key setup-pkcs11-setup-pkcs11-token
-setup: setup-user setup-pkcs11-token enroll-cert bind-gpg-key export-gpg-key
+setup: setup-user (prepare-user-dir "secure-build") setup-pkcs11-token enroll-cert bind-gpg-key export-gpg-key
     @echo "TPM-backed GPG signing identity enrolled; containers-storage now requires signedBy verification."
