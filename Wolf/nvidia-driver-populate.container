@@ -6,7 +6,7 @@ After=nvidia-driver.volume
 
 [Container]
 ContainerName=%p
-Image=gow/nvidia-driver:latest
+Image=localhost/gow/nvidia-driver:latest
 Exec=sh
 Volume=nvidia-driver-vol:/usr/nvidia
 

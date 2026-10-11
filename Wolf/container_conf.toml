@@ -1,10 +1,6 @@
 [storage]
 driver = "overlay"
-# The service user maintains its own local runtime metadata/containers here:
+# The service user maintains its own local runtime metadata/containers here.
+# Signed images are copied in by `load-image`; the builder's output is a
+# dir: layout, which can't serve as an additional image store.
 graphroot = "/var/home/wolf/.local/share/containers/storage"
-
-[storage.options]
-# Point to the read-only store populated by the builder:
-additionalimagestores = [
-  "/var/lib/container-stores/wolf"
-]

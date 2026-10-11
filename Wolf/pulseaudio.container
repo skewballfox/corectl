@@ -1,12 +1,14 @@
 [Unit]
 Description=PulseAudio server for Wolf/Games On Whales
-After=network-online.target podman.socket
+After=podman.socket
 Requires=podman.socket
+# Give up after 5 failed starts in 2 min (RestartSec=5 can't hit the default 10s window)
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 Restart=on-failure
 RestartSec=5
-StartLimitBurst=5
 
 [Container]
 AutoUpdate=registry
@@ -23,9 +25,20 @@ DropCapability=ALL
 # doesn't glitch under load. This is the only capability it needs.
 AddCapability=CAP_SYS_NICE
 
-Volume=pulse-socket-vol:/tmp/pulse
+# Run as the image's unprivileged 'ubuntu' user (uid/gid 1000) instead of
+# container-root. The upstream /entrypoint.sh always ends in
+# `gosu $UNAME startup.sh`, which needs CAP_SETUID/CAP_SETGID even to
+# "switch" to root, so bypass it and exec the startup script directly.
+# None of its cont-init.d steps apply here (no user setup, no devices, no GPU).
+User=1000
+Group=1000
+Entrypoint=/opt/gow/startup.sh
+# HOME defaults to /root, which uid 1000 can't write; startup.sh and
+# pulseaudio keep their ~/.config/pulse state under it.
+Environment=HOME=/tmp/home
+
+# :U chowns the volume to uid 1000 so pulseaudio can create its socket there.
+# The socket is created 0777 (auth-anonymous=1), so Wolf can still connect.
+Volume=pulse-socket-vol:/tmp/pulse:U
 
 Environment=PULSE_SERVER=unix:/tmp/pulse/pulse-socket
-
-[Install]
-WantedBy=default.target

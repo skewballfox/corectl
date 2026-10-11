@@ -62,9 +62,18 @@ enroll-cert store_path=pkcs11_store pin_path=pkcs11_pin cert_path=sign_cert pki_
         chmod 644 "{{ cert_path }}"
     fi
 
-    echo "Writing certificate onto the PKCS11 token..."
-    just build_cmd -s {{ store_path }} -p {{ pin_path }} -- p11tool --login --set-pin="$USERPIN" --write "pkcs11:token=secure-build" \
-        --load-certificate "{{ cert_path }}" --label secure-build-signing
+    # Write it once only: pkcs11-helper treats a cert as a CA if any *other* cert
+    # on the token was issued by it, so duplicate copies of this self-signed cert
+    # all become CAs, leaving gnupg-pkcs11-scd no user cert for the key (KEYINFO
+    # then reports "not found" and gpg-agent loops forever).
+    if just build_cmd -s {{ store_path }} -p {{ pin_path }} -- p11tool --list-all-certs \
+        "pkcs11:token=secure-build;object=secure-build-signing" 2>/dev/null | grep -q 'X.509 Certificate'; then
+        echo "Certificate already on the PKCS11 token."
+    else
+        echo "Writing certificate onto the PKCS11 token..."
+        just build_cmd -s {{ store_path }} -p {{ pin_path }} -- p11tool --login --set-pin="$USERPIN" --write "pkcs11:token=secure-build" \
+            --load-certificate "{{ cert_path }}" --label secure-build-signing
+    fi
 
 # Configures gpg-agent to launch gnupg-pkcs11-scd via /usr/bin/env
 [private]
@@ -91,13 +100,11 @@ configure-gnupg gnupg_home=gnupg_home store_path=pkcs11_store pki_dir=pki_dir:
 
     chown -R secure-build:secure-build "{{ gnupg_home }}"
 
-# Discovers the PKCS11 object's card-key hash via GnuPG's own stable
-# card-status interface (rather than parsing raw scdaemon protocol lines)
-# and writes it into gnupg-pkcs11-scd.conf as the "signature" role, so
-# `--quick-generate-key ... card` has something to build a signing subkey
-# from. CAVEAT: confirm the "grp:" record still holds the keygrip in the
-# last field on your gnupg-pkcs11-scd version — run `gpg --card-status
-# --with-colons` directly if this comes back empty.
+# Has gpg-agent learn the token's key and write its card stub
+# (private-keys-v1.d/<keygrip>.key), which bind-gpg-key's `Key-Grip:` needs.
+# No openpgp-sign/encr/auth lines in gnupg-pkcs11-scd.conf: those switch it to
+# gnupg-2.0 emulation, where it ignores the keyref gpg-agent 2.4 passes to
+# READKEY, so the agent's LEARN fails and no stub gets written.
 [private]
 map-card-key gnupg_home=gnupg_home store_path=pkcs11_store hash_path=signing_key_hash_path pin_path=pkcs11_pin cert_path=sign_cert pki_dir=pki_dir: (configure-gnupg)
     #!/usr/bin/env bash
@@ -114,20 +121,21 @@ map-card-key gnupg_home=gnupg_home store_path=pkcs11_store hash_path=signing_key
     just build_cmd -s {{ store_path }} -p {{ pin_path }} -g {{ gnupg_home }} -- systemctl --user restart gpg-agent
     just build_cmd -s {{ store_path }} -p {{ pin_path }} -g {{ gnupg_home }} -- gpg-connect-agent /bye
 
-    STATUS=$(just build_cmd -s {{ store_path }} -p {{ pin_path }} -g {{ gnupg_home }} -- gpg --card-status --with-colons 2>/dev/null || true)
-    echo $STATUS
-    # Extract 40-character hex keygrip directly from grp lines
-    # Query scdaemon directly for KEYPAIRINFO records returned by gnupg-pkcs11-scd
     HASH=$(just build_cmd -s {{ store_path }} -p {{ pin_path }} -g {{ gnupg_home }} -- \
         gpg-connect-agent 'SCD LEARN --force' /bye 2>/dev/null \
-        | awk '/S KEYPAIRINFO/ {print $3; exit}')
+        | awk '/^S KEYPAIRINFO/ {print $3; exit}')
+    [[ "$HASH" =~ ^[0-9A-F]{40}$ ]] \
+        || (echo "no KEYPAIRINFO from scdaemon — check the token holds exactly one secure-build-signing cert" && exit 1)
 
-    [ -n "$HASH" ] || (echo "could not read keygrip from scdaemon — check gnupg-pkcs11-scd logs" && exit 1)
+    # The agent's own LEARN (not "SCD LEARN") READKEYs each key and writes stubs
+    just build_cmd -s {{ store_path }} -p {{ pin_path }} -g {{ gnupg_home }} -- \
+        gpg-connect-agent 'LEARN --force' /bye
+    # "S KEYINFO <keygrip> T ..." — T marks a key stored on a card
+    just build_cmd -s {{ store_path }} -p {{ pin_path }} -g {{ gnupg_home }} -- \
+        gpg-connect-agent "KEYINFO $HASH" /bye | grep -q "^S KEYINFO $HASH T " \
+        || (echo "gpg-agent wrote no card stub for $HASH — check journalctl for gpg-agent/gnupg-pkcs11-scd" && exit 1)
+    echo "Card key $HASH registered with gpg-agent"
 
-
-    if ! grep -q "^openpgp-sign $HASH" "{{ gnupg_home }}/gnupg-pkcs11-scd.conf" 2>/dev/null; then
-        echo "openpgp-sign $HASH" |  tee -a "{{ gnupg_home }}/gnupg-pkcs11-scd.conf" > /dev/null
-    fi
     {{ auth }} pkill -u secure-build -f gpg-agent || true
     {{ auth }} pkill -u secure-build -f gnupg-pkcs11-scd || true
 
@@ -141,11 +149,15 @@ bind-gpg-key gnupg_home=gnupg_home store_path=pkcs11_store  pin_path=pkcs11_pin:
         exit 0
     fi
     
+    # Keygrip from LEARN's "S KEYPAIRINFO <keygrip> <keyref>". KEYPAIRINFO only
+    # appears for a cert paired with its private key; it goes missing if
+    # duplicate certs on the token get classed as CAs (CERTINFO 102).
     HASH=$(just build_cmd -s {{ store_path }} -p {{ pin_path }} -g {{ gnupg_home }} -- \
         gpg-connect-agent 'SCD LEARN --force' /bye 2>/dev/null \
-        | awk '/S KEYPAIRINFO/ {print $3; exit}')
+        | awk '/^S KEYPAIRINFO/ {print $3; exit}')
     echo HASH IS $HASH
-    [ -n "$HASH" ] || (echo "could not read keygrip from scdaemon — check gnupg-pkcs11-scd logs" && exit 1)
+    [[ "$HASH" =~ ^[0-9A-F]{40}$ ]] \
+        || (echo "no KEYPAIRINFO from scdaemon — check the token holds exactly one secure-build-signing cert" && exit 1)
 
     UID_STR=$(openssl x509 -in "{{ sign_cert }}" -noout -subject \
     | sed -n 's/.*CN\s*=\s*\([^,/]*\).*/\1/p')
@@ -168,49 +180,43 @@ bind-gpg-key gnupg_home=gnupg_home store_path=pkcs11_store  pin_path=pkcs11_pin:
         gpg --batch --generate-key --pinentry-mode loopback --passphrase-fd 0  "$BATCH_FILE"    
     
 
-# Exports the bound GPG key and rewrites policy.json to use signedBy/GPGKeys
-# instead of sigstoreSigned. Run after bind-gpg-key has produced a secret key.
-export-gpg-key gnupg_home=gnupg_home sign_link_path=sign_pem_link keyring_path=sign_keyring key_id_path=signing_key_id_path:
+# Exports the bound GPG key to a keyring and records its fingerprint for
+# sign-gpg, then hands off to enroll-gpg-key to install it and point
+# policy.json at it. Run after bind-gpg-key has produced a secret key.
+export-gpg-key gnupg_home=gnupg_home keyring_path=sign_keyring key_id_path=signing_key_id_path: && (enroll-gpg-key keyring_path)
     #!/usr/bin/env bash
     set -euo pipefail
-    
-    # Obtain Key ID from the card / scdaemon state
-     KEYID=$(just build_cmd -- gpg --card-status | awk '/Key attribute/ {print $NF}' | head -n1)
-    [ -n "$KEYID" ] || (echo "Failed to locate GPG Key ID from TPM card status" && exit 1)
 
-    # Save the key ID for sign-gpg
-    echo "$KEYID" > "{{ key_id_path }}"
+    # Fingerprint of the card-bound key
+    KEYID=$(just build_cmd -- gpg --batch --with-colons --list-secret-keys \
+        | awk -F: '/^fpr:/ {print $10; exit}')
+    [ -n "$KEYID" ] || (echo "Failed to locate the bound GPG secret key — run bind-gpg-key first" && exit 1)
 
     # Export public key ring for verification
     just build_cmd -- gpg --batch --yes --export "$KEYID" | {{ auth }} tee "{{ keyring_path }}" > /dev/null
-    
+    # gpg exits 0 with "nothing exported" on an unknown key, leaving an empty keyring
+    {{ auth }} test -s "{{ keyring_path }}" || (echo "gpg exported nothing for $KEYID" && exit 1)
     {{ auth }} chmod 644 "{{ keyring_path }}"
 
-    echo "Linking into {{ containers_pki_dir }}..."
-    {{ auth }} ln -sf "{{ keyring_path }}" {{ sign_link_path }}
-
-    echo "Updating {{ policy_path }}..."
-    POLICY_TMP=$(mktemp)
-    [ -f "{{ policy_path }}" ] || echo '{}' | {{ auth }} tee "{{ policy_path }}" > /dev/null
-    jq \
-        --arg keypath "{{ sign_link_path }}" \
-        '.default //= [{"type": "reject"}]
-         | .transports["containers-storage"][""] = [{"type": "signedBy", "keyType": "GPGKeys", "keyPath": $keypath}]' \
-        "{{ policy_path }}" > "$POLICY_TMP"
-    {{ auth }} cp "$POLICY_TMP" "{{ policy_path }}"
-
+    # Save the key ID for sign-gpg
     echo "$KEYID" | {{ auth }} tee "{{ key_id_path }}" > /dev/null
-    echo "GPG key $KEYID enrolled; containers-storage now requires signedBy verification."
+    echo "Exported GPG key $KEYID to {{ keyring_path }}"
 
+# Installs a GPG public keyring where podman/skopeo read it and requires
+# signedBy verification against it for containers-storage. Runs after
+# export-gpg-key; call it directly to re-enroll an existing keyring.
 [private]
 enroll-gpg-key key_pub_path=sign_keyring gpg_pub_link_path=gpg_pub_link_path policy_path=policy_path:
     #!/usr/bin/env bash
     set -euo pipefail
     POLICY_TMP=$(mktemp)
 
-    echo "Linking GPG public key into {{ containers_pki_dir }}..."
+    # Copy rather than symlink: pki_dir isn't traversable by the users whose
+    # podman/skopeo read this key through policy.json.
+    echo "Installing GPG public key into {{ containers_pki_dir }}..."
     {{ auth }} mkdir -p "{{ containers_pki_dir }}"
-    {{ auth }} ln -sf "{{ key_pub_path }}" "{{ gpg_pub_link_path }}"
+    {{ auth }} test -s "{{ key_pub_path }}" || (echo "{{ key_pub_path }} is empty — run export-gpg-key first" && exit 1)
+    {{ auth }} install -m 644 -o root -g root -T "{{ key_pub_path }}" "{{ gpg_pub_link_path }}"
 
     echo "Updating {{ policy_path }} for GPG verification..."
     [ -f "{{ policy_path }}" ] || echo '{}' | {{ auth }} tee "{{ policy_path }}" > /dev/null

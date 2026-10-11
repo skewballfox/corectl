@@ -13,10 +13,13 @@ auth_as(target_user) := if auth == "run0" {
     "sudo -u " + target_user
 }
 
+# Takes ONE pre-quoted command string (build it with printf '%q '):
+# run0 --via-shell joins argv with spaces and hands it to `$SHELL -c` unquoted,
+# so separate args containing ';', spaces etc. would be re-split.
 shell_as(target_user) := if auth == "run0" {
-    "run0 --via-shell -u " + target_user 
+    "run0 --via-shell -u " + target_user
 } else {
-    "sudo -u " + target_user
+    "sudo -u " + target_user + " bash -c"
 }
 
 
@@ -99,14 +102,15 @@ build_cmd store_path=pkcs11_store pin_path=pkcs11_pin cert_path=sign_cert pki_di
     #!/usr/bin/env bash
     set -euo pipefail
     source <(cat "{{pin_path}}")
-    {{ shell_as("secure-build") }} env  GNUPGHOME="{{ gpg_home }}" \
+    CMD=$(printf '%q ' env GNUPGHOME="{{ gpg_home }}" \
             TPM2_PKCS11_TCTI="device:/dev/tpmrm0" \
             TPM2_PKCS11_BACKEND="esysdb" \
             TPM2_PKCS11_LOG_LEVEL=2 \
             GNUTLS_PIN="$USERPIN" \
             GNUTLS_SO_PIN="$SOPIN" \
             TPM2_PKCS11_STORE="{{store_path}}" \
-            "${@:6}"
+            "${@:6}")
+    {{ shell_as("secure-build") }} "$CMD"
 
 [no-cd]
 [arg('store_path', short="s", long="store-path")]
@@ -118,14 +122,17 @@ unshared_build_cmd store_path=pkcs11_store pin_path=pkcs11_pin cert_path=sign_ce
     #!/usr/bin/env bash
     set -euo pipefail
     source <(cat "{{pin_path}}")
-    {{ auth_as("secure-build") }} podman unshare env  GNUPGHOME="{{ gpg_home }}" \
+    # Via the login shell like build_cmd: podman exec'd straight from run0 stays
+    # unconfined_t, where secureblue denies user_namespace create.
+    CMD=$(printf '%q ' podman unshare env GNUPGHOME="{{ gpg_home }}" \
             TPM2_PKCS11_TCTI="device:/dev/tpmrm0" \
             TPM2_PKCS11_BACKEND="esysdb" \
             TPM2_PKCS11_LOG_LEVEL=2 \
             GNUTLS_PIN="$USERPIN" \
             GNUTLS_SO_PIN="$SOPIN" \
             TPM2_PKCS11_STORE="{{store_path}}" \
-            "${@:6}"
+            "${@:6}")
+    {{ shell_as("secure-build") }} "$CMD"
 
 # Pre-check: Enforce that the current recipe executes as the expected user
 [private]
@@ -396,24 +403,28 @@ sign-cosign full_tag out-dir tag sign_priv_path=sign_priv:
     {{ auth }} mkdir -p "$SIG_STORE_DIR"
     {{ auth }} cp "$BUNDLE_PATH" "$SIG_STORE_DIR/signature-1"
 
-# Stages and signs the built image in one step via skopeo's built-in
-# --sign-by, using the TPM-backed GPG key enrolled in export-gpg-key.
-# Uses `dir:` (not `oci:`) as the target — it's the transport with the
-# well-established local signature-alongside-image behavior for this
-# exact "no registry" pattern; verify `signature-1` actually lands next
-# to manifest.json on your skopeo version before relying on it, and add
-# an explicit registries.d lookaside pointing at this same path if it
-# doesn't (registries.d/default.yaml: sigstore: file://{{ out-dir }}).
+# Stages the built image into a `dir:` target and signs it with the
+# TPM-backed GPG key enrolled in export-gpg-key, writing signature-1 next
+# to manifest.json (the dir transport's signature layout).
+# Two steps on purpose: only the copy out of containers-storage needs
+# secure-build's user namespace, and gnupg-pkcs11-scd spins forever when gpg
+# runs inside `podman unshare`. standalone-sign only reads the manifest, so it
+# runs outside, against secure-build's normal gpg-agent.
 [private]
 [no-cd]
 sign-gpg full_tag out-dir tag signing_key_id_path=signing_key_id_path gnupg_home=gnupg_home pin_path=pkcs11_pin:
     #!/usr/bin/env bash
     set -euo pipefail
     [ -f "{{ signing_key_id_path }}" ] || (echo "no enrolled GPG signing key found — run 'just enroll-key' or 'just setup' first" && exit 1)
-    
+
     source <(cat "{{ pin_path }}")
-    KEYID=$(just build_cmd -- gpg --batch --with-colons --list-secret-keys \
-        | awk -F: '/^fpr:/ {print $10; exit}')
+    KEYID=$(cat "{{ signing_key_id_path }}")
+    # Clear agents left by earlier runs (e.g. one spawned inside a userns)
+    stop_agents() {
+        {{ auth }} pkill -u secure-build -f gnupg-pkcs11-scd || true
+        {{ auth }} pkill -u secure-build -x gpg-agent || true
+    }
+    stop_agents
 
     SAFE_TAG_NAME=$(echo "{{ tag }}" | tr '/:' '_')
     # apparently skopeo will refuse to write to a non-container directory so a directory per target needs to be created
@@ -426,23 +437,26 @@ sign-gpg full_tag out-dir tag signing_key_id_path=signing_key_id_path gnupg_home
     printf '%s\n' "$USERPIN" > "$PIN_FILE"
     chmod 600 "$PIN_FILE"
     chown secure-build:secure-build "$PIN_FILE"
-    trap 'rm -f "$POLICY_TMP" "$PIN_FILE"' EXIT
+    trap 'rm -f "$POLICY_TMP" "$PIN_FILE"; stop_agents' EXIT
     echo '{"default":[{"type":"insecureAcceptAnything"}]}' > "$POLICY_TMP"
     chown -R secure-build:secure-build "$POLICY_TMP"
 
-    echo "==> Staging and signing image (GPG key $KEYID)..."
-    just unshared_build_cmd -- GNUPGHOME="{{ gnupg_home }}" skopeo copy \
+    echo "==> Staging image..."
+    just unshared_build_cmd -- skopeo copy \
         --policy "$POLICY_TMP" \
-        --sign-by "$KEYID" \
-        --sign-passphrase-file "$PIN_FILE" \
-        --sign-identity "{{ full_tag }}" \
         "containers-storage:{{ full_tag }}" \
         "dir:$TARGET_DIR"
 
+    echo "==> Signing image (GPG key $KEYID)..."
+    rm -f "$TARGET_DIR"/signature-*
+    just build_cmd -g "{{ gnupg_home }}" -- skopeo standalone-sign \
+        --passphrase-file "$PIN_FILE" \
+        --output "$TARGET_DIR/signature-1" \
+        "$TARGET_DIR/manifest.json" "{{ full_tag }}" "$KEYID"
+
     find "$TARGET_DIR" -type f -exec chmod 640 {} +
     find "$TARGET_DIR" -type d -exec chmod 2750 {} +
-    ls "$TARGET_DIR"/signature-* > /dev/null 2>&1 \
-        || echo "WARNING: no signature-* file found in $TARGET_DIR — check registries.d lookaside config"
+    [ -s "$TARGET_DIR/signature-1" ] || (echo "standalone-sign produced no signature in $TARGET_DIR" && exit 1)
 
 # Prepares a per-user output directory under the secure-build container
 # store: creates it if missing, grants the target user *traversal only*
@@ -492,9 +506,10 @@ prepare-user-dir target_user base_dir=container-store:
 [arg('build-args', multiple, short="b", long="build-arg")]
 [arg('out-dir', short="o", long="out-dir")]
 [arg('dockerfile', short="f", long="dockerfile")]
+[arg('context', short="c", long="context")]
 [private]
 [no-cd]
-build-and-sign tag dockerfile="Dockerfile" build-args=[] out-dir="" extra_flags="" sign_recipe="sign-gpg":
+build-and-sign tag dockerfile="Dockerfile" build-args=[] out-dir="" context="." extra_flags="" sign_recipe="sign-gpg":
     #!/usr/bin/env bash
     set -euo pipefail
     [ ! -z "{{ out-dir }}" ] && [ -d "{{ out-dir }}" ] || (echo "create target directory first" && exit 1)
@@ -519,14 +534,17 @@ build-and-sign tag dockerfile="Dockerfile" build-args=[] out-dir="" extra_flags=
 
     mkdir "$CONTEXT_DIR"
     # Copy the whole context (Dockerfile + anything it COPY/ADDs), not just the Dockerfile
-    cp -a . "$CONTEXT_DIR"/
+    cp -a "{{ context }}"/. "$CONTEXT_DIR"/
     touch "$IIDFILE"
     # Hand the whole staged directory over to secure-build
     chown -R secure-build:secure-build "$STAGE_DIR"
     
 
     
+    # buildah (unlike podman build) defaults to --layers=false, which keeps no
+    # intermediate layers and reruns every step on every build.
     just build_cmd -- buildah build \
+        --layers \
         --isolation chroot \
         --signature-policy "$BUILD_POLICY" \
         -f "$DOCKERFILE_ABS" \
