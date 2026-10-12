@@ -1,0 +1,7 @@
+# Wolf's XDG_RUNTIME_DIR: wolf.sock, the Wayland sockets and pulse-socket,
+# shared by wolf.container and pulseaudio.container. Created here, not on
+# first use: podman chowns the top dir of a volume that a keep-id container
+# creates to that container's root (a subuid), and as that dir is 0700 the
+# host wolf user (Wolf's socket wait, app container mounts) is locked out.
+[Volume]
+VolumeName=wolf-runtime-vol

@@ -1,52 +1,87 @@
 [Unit]
 Description=Wolf / Games On Whales
-Requires=network-online.target podman.socket pulseaudio.service nvidia-driver-populate.service
-After=network-online.target podman.socket pulseaudio.service nvidia-driver-populate.service
+# No network-online.target: wolf's user manager has none; quadlet already orders
+# after podman-user-wait-network-online.service.
+Requires=podman.socket pulseaudio.service nvidia-driver-volume.service
+After=podman.socket pulseaudio.service nvidia-driver-volume.service
 BindsTo=pulseaudio.service
 
+# Give up after 5 failed starts in 2 min (RestartSec=5 can't hit the default 10s window)
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 TimeoutStartSec=900
 ExecStartPre=-/usr/bin/podman rm --force WolfPulseAudio
 Restart=on-failure
 RestartSec=5
-StartLimitBurst=5
-ExecStartPre=/usr/bin/timeout 30 /bin/sh -c 'vol=$(podman volume inspect pulse-socket-vol --format "{{.Mountpoint}}"); until test -S "$vol/pulse-socket"; do sleep 0.5; done'
+ExecStartPre=/usr/bin/timeout 30 /bin/sh -c 'vol=$(podman volume inspect wolf-runtime-vol --format "{{.Mountpoint}}"); until test -S "$vol/pulse-socket"; do sleep 0.5; done'
+# The driver volume must match the loaded kernel module. rpm-ostree applies a
+# driver update at reboot; until the image is rebuilt, fail here rather than
+# with EGL/CUDA errors mid-session.
+ExecStartPre=/bin/sh -c 'want=$(cat /sys/module/nvidia/version); have=$(podman image inspect localhost/gow/nvidia-driver:latest --format "{{.Labels.nvidia_driver_version}}"); [ "$have" = "$want" ] || { echo "nvidia-driver-vol is $have but the kernel module is $want: run just wolf build-containers load-images install" >&2; exit 1; }'
 
 [Container]
 AutoUpdate=registry
 ContainerName=%p
 HostName=%p
-Image=wolf-nvidia:latest
+# Minimal image (no embedded PulseAudio/supervisord), built by build-wolf
+Image=localhost/gow/wolf:minimal
 Network=host
 
+# Rootless: run as the image's `wolf` user (uid/gid 990) and skip the GOW
+# root-only init + gosu. keep-id maps it to the host wolf user, so files in
+# /etc/wolf and the podman socket line up; keep-groups passes on the host
+# wolf user's render/input/video groups for device access.
+Exec=--rootless
+UserNS=keep-id:uid=990,gid=990
+GroupAdd=keep-groups
 DropCapability=ALL
 
-PodmanArgs=--ipc=host --device-cgroup-rule "c 13:* rmw" --security-opt label=type:container_use_devices.process
+# No --device-cgroup-rule: rootless podman rejects it (no device cgroup control
+# in a user namespace); device access is by file permissions + keep-groups.
+# No custom SELinux type either: container_use_devices.process isn't in the
+# loaded policy (crun fails on it). Runs as container_t; see TESTING-rootless.md
+# if uinput/uhid hit AVC denials.
+PodmanArgs=--ipc=host
 
 AddDevice=/dev/dri
 AddDevice=/dev/uinput
 AddDevice=/dev/uhid
+# NVIDIA device nodes only. No CDI: it injects whatever driver libraries the
+# host has (CUDA only here, no EGL/GBM). All NVIDIA userspace comes from the
+# driver volume below, the same one handed to app containers.
+AddDevice=/dev/nvidia0
+AddDevice=/dev/nvidiactl
+AddDevice=/dev/nvidia-modeset
 AddDevice=/dev/nvidia-uvm
 AddDevice=/dev/nvidia-uvm-tools
-AddDevice=/dev/nvidia-caps/nvidia-cap1
-AddDevice=/dev/nvidia-caps/nvidia-cap2
-AddDevice=/dev/nvidiactl
-AddDevice=/dev/nvidia0
-AddDevice=/dev/nvidia-modeset
 
-Volume=nvidia-driver-vol:/usr/nvidia:ro
 # Replaced /dev bind with read-only /run/udev for device discovery
 Volume=/run/udev:/run/udev:ro
 # Read-Write mount for Wolf persistent configuration
 Volume=/etc/wolf/:/etc/wolf:z
-Volume=/run/podman/podman.sock:/var/run/docker.sock:ro
-Volume=pulse-socket-vol:/tmp/pulse
+# The wolf user's own (rootless) podman socket; app containers run there too
+Volume=%t/podman/podman.sock:/var/run/docker.sock
+# Wolf's XDG_RUNTIME_DIR (wolf.sock, Wayland sockets), shared with pulseaudio
+# for pulse-socket; replaces the image's anonymous VOLUME.
+Volume=wolf-runtime.volume:/run/user/wolf
+Volume=nvidia-driver-vol:/usr/nvidia:ro
 
 Environment=WOLF_STOP_CONTAINER_ON_EXIT=TRUE
 Environment=NVIDIA_DRIVER_VOLUME_NAME=nvidia-driver-vol
-Environment=WOLF_RENDER_NODE=/dev/dri/renderD129
-Environment=PULSE_SERVER=unix:/tmp/pulse/pulse-socket
+# Point the loaders at the driver volume; GOW's root-only init does this
+# upstream, but --rootless skips it.
+Environment=LD_LIBRARY_PATH=/usr/nvidia/lib
+Environment=__EGL_VENDOR_LIBRARY_DIRS=/usr/nvidia/share/glvnd/egl_vendor.d
+Environment=__EGL_EXTERNAL_PLATFORM_CONFIG_DIRS=/usr/nvidia/share/egl/egl_external_platform.d
+Environment=GBM_BACKENDS_PATH=/usr/nvidia/lib/gbm
+Environment=VK_DRIVER_FILES=/usr/nvidia/share/vulkan/icd.d/nvidia_icd.json
+# renderD128 is the NVIDIA card on this host (ls -l /sys/class/drm/renderD*/device/driver)
+Environment=WOLF_RENDER_NODE=/dev/dri/renderD128
+# A bare path, no unix: prefix: Wolf reuses this string as the socket's
+# mount target in app containers.
+Environment=PULSE_SERVER=/run/user/wolf/pulse-socket
 
-[Install]
-WantedBy=default.target
+# No [Install] section: Wolf runs on demand (`just wolf start` / `stop` /
+# `toggle`). `just wolf autostart on` adds a drop-in that restores boot start.

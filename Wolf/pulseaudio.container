@@ -1,31 +1,43 @@
 [Unit]
 Description=PulseAudio server for Wolf/Games On Whales
-After=network-online.target podman.socket
+After=podman.socket
 Requires=podman.socket
+# Give up after 5 failed starts in 2 min (RestartSec=5 can't hit the default 10s window)
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 Restart=on-failure
 RestartSec=5
-StartLimitBurst=5
 
 [Container]
-AutoUpdate=registry
 ContainerName=%p
 HostName=%p
-Image=ghcr.io/games-on-whales/pulseaudio:master
+# Signed local build from the gow fork's `patches` branch (build-gow), whose
+# image runs the daemon as the 'pulse' system user. No AutoUpdate: there's
+# no registry behind a localhost image; rebuild with build-gow + load-images.
+Image=localhost/gow/pulseaudio:patches
 
 # No network needed at all - audio moves over a unix socket/shared memory,
 # never touches a socket that needs host networking or even a bridge.
 Network=none
 
+# No capabilities at all. CAP_SYS_NICE did nothing here: in a rootless user
+# namespace the kernel checks RT scheduling against the initial namespace.
 DropCapability=ALL
-# SYS_NICE lets PA's mixing thread run at elevated scheduling priority so it
-# doesn't glitch under load. This is the only capability it needs.
-AddCapability=CAP_SYS_NICE
+NoNewPrivileges=true
 
-Volume=pulse-socket-vol:/tmp/pulse
+# Start directly as the image's 'pulse' user. The patched entrypoint skips
+# the root-only init and gosu when it's already running as UNAME, so no
+# Entrypoint/HOME overrides are needed (HOME=/var/lib/pulse is pulse's own).
+User=pulse
+
+# The socket goes in Wolf's runtime dir: Wolf mounts <runtime dir>/pulse-socket
+# into every app container. keep-id makes 'pulse' (uid 100, gid 101 in the
+# Ubuntu image) the host wolf user, the same user Wolf runs as, and :U hands
+# the volume to it, so both can create sockets there. The socket is 0777
+# (auth-anonymous=1).
+UserNS=keep-id:uid=100,gid=101
+Volume=wolf-runtime.volume:/tmp/pulse:U
 
 Environment=PULSE_SERVER=unix:/tmp/pulse/pulse-socket
-
-[Install]
-WantedBy=default.target

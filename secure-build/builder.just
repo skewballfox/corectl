@@ -113,13 +113,19 @@ setup-pkcs11-token sign_pub_path=sign_pub sign_priv_path=sign_priv pin_path=pkcs
         echo "store/token already initialized"
     fi
 
-    just build_cmd -p {{pin_path}} -- tpm2_ptool addkey \
-        --label=secure-build \
-        --userpin="$USERPIN" \
-        --key-label=secure-build-signing \
-        --algorithm=rsa2048 \
-        --path="{{ store_path }}" \
-        # "{{ sign_pub_path }}" "{{ sign_priv_path }}"
+    # addkey doesn't dedupe by label; rerunning it leaves several keys named
+    # secure-build-signing, only one of which matches the enrolled cert.
+    if just build_cmd -p {{pin_path}} -- tpm2_ptool listobjects --label=secure-build --path="{{ store_path }}" 2>/dev/null \
+        | grep -q 'CKA_LABEL: secure-build-signing'; then
+        echo "signing key already on token"
+    else
+        just build_cmd -p {{pin_path}} -- tpm2_ptool addkey \
+            --label=secure-build \
+            --userpin="$USERPIN" \
+            --key-label=secure-build-signing \
+            --algorithm=rsa2048 \
+            --path="{{ store_path }}"
+    fi
 
 
 # Stops running daemons and removes all TPM contexts, PKCS11 tokens, certs,
@@ -166,7 +172,6 @@ regenerate-gpg sign_ctx_path=sign_ctx sign_pub_path=sign_pub sign_priv_path=sign
     just builder::enroll-cert
     just builder::bind-gpg-key
     just builder::export-gpg-key
-    just builder::enroll-gpg-key
 
 
 setup-user container-storage=container-store:
