@@ -12,8 +12,14 @@ RUN apt-get update -y && \
 RUN echo -e "/usr/nvidia/lib\n/usr/nvidia/lib32" > /etc/ld.so.conf.d/nvidia.conf && ldconfig
 
 ################
+# Data-only image backing nvidia-driver.volume (Driver=image). An image volume
+# exposes the whole image root, so the driver tree sits at / and lands at
+# /usr/nvidia wherever the volume is mounted. Never run: no shell or libc.
 FROM scratch AS nvidia-driver
 
-COPY --from=nvidia-installer /usr/nvidia/ /usr/nvidia
-COPY --from=nvidia-installer /etc/vulkan/icd.d/nvidia_icd.json /usr/nvidia/share/vulkan/icd.d/
-COPY --from=nvidia-installer /bin/sh /bin/sh
+# Checked against the loaded kernel module before Wolf starts (wolf.container)
+ARG NV_VERSION
+LABEL nvidia_driver_version=$NV_VERSION
+
+COPY --from=nvidia-installer /usr/nvidia/ /
+COPY --from=nvidia-installer /etc/vulkan/icd.d/nvidia_icd.json /share/vulkan/icd.d/

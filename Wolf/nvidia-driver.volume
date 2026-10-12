@@ -1,3 +1,9 @@
 # nvidia-driver.volume
+# Backed directly by the driver image (no populate container): Wolf hands this
+# volume to app containers by name (NVIDIA_DRIVER_VOLUME_NAME), mounted at
+# /usr/nvidia. The volume pins the image it was created from: after loading a
+# new driver image, `podman volume rm nvidia-driver-vol` (install does this).
 [Volume]
 VolumeName=nvidia-driver-vol
+Driver=image
+Image=localhost/gow/nvidia-driver:latest
