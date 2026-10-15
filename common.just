@@ -535,6 +535,9 @@ build-and-sign tag dockerfile="Dockerfile" build-args=[] out-dir="" context="." 
     mkdir "$CONTEXT_DIR"
     # Copy the whole context (Dockerfile + anything it COPY/ADDs), not just the Dockerfile
     cp -a "{{ context }}"/. "$CONTEXT_DIR"/
+    # Shebang heredocs (RUN <<EOF + #!/bin/bash) fail under --isolation chroot;
+    # rewrite the staged copy to feed them to the interpreter on stdin instead
+    python3 "{{ source_directory() }}/secure-build/fix_heredoc_shebangs.py" "$DOCKERFILE_ABS"
     touch "$IIDFILE"
     # Hand the whole staged directory over to secure-build
     chown -R secure-build:secure-build "$STAGE_DIR"

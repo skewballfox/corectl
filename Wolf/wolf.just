@@ -185,13 +185,19 @@ load-image tag=wolf_tag:
 load-images: (load-image "gow/nvidia-driver:latest") (load-image wolf_tag) (load-image ui_tag) (load-image pulse_tag)
 
 # Point the apps in Wolf's config that run `image` at the local signed `tag`.
+# Also matches mirror-app's copy of `image` (localhost/gow/<name>:<tag>), so a
+# mirrored app can be switched to a fork build later.
 # Wolf writes TOML strings single-quoted; accept either quote style.
 [private]
 use-app-image image tag:
     #!/usr/bin/env bash
     set -euo pipefail
     CONFIG=/etc/wolf/cfg/config.toml
-    {{ auth }} sed -i -E "s|([\"']){{ image }}\\1|\\1localhost/{{ tag }}\\1|" "$CONFIG"
+    NAME="{{ image }}"
+    NAME="${NAME##*/}"
+    [[ "$NAME" == *:* ]] || NAME="$NAME:latest"
+    MIRROR="localhost/gow/$NAME"
+    {{ auth }} sed -i -E "s#([\"'])({{ image }}|$MIRROR)\\1#\\1localhost/{{ tag }}\\1#" "$CONFIG"
     {{ auth }} grep -q "localhost/{{ tag }}" "$CONFIG" \
         || { echo "{{ image }} not found in $CONFIG; set the app's image to localhost/{{ tag }} by hand" >&2; exit 1; }
     echo "Wolf config now uses localhost/{{ tag }}"
