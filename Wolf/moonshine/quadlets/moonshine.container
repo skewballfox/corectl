@@ -1,0 +1,77 @@
+[Unit]
+Description=Moonshine (Moonlight streaming server)
+Requires=nvidia-driver-volume.service moonshine-runtime-volume.service moonshine-x11-volume.service moonshine-steam-home-volume.service moonshine-bus-proxy.service
+After=nvidia-driver-volume.service moonshine-runtime-volume.service moonshine-x11-volume.service moonshine-steam-home-volume.service moonshine-bus-proxy.service
+
+# Give up after 5 failed starts in 2 min (RestartSec=5 can't hit the default 10s window)
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Restart=on-failure
+RestartSec=5
+# The driver volume must match the loaded kernel module (see wolf/wolf.container)
+ExecStartPre=/bin/sh -c 'want=$(cat /sys/module/nvidia/version); have=$(podman image inspect localhost/gow/nvidia-driver:latest --format "{{.Labels.nvidia_driver_version}}"); [ "$have" = "$want" ] || { echo "nvidia-driver-vol is $have but the kernel module is $want: rebuild and reload the driver image" >&2; exit 1; }'
+
+[Container]
+Environment=MOONSHINE_LOG=warn,moonshine=info,moonshine_core=info
+ContainerName=%p
+HostName=%p
+# moonshine.just moonshine_tag
+Image=localhost/moonshine/moonshine:patches
+Network=host
+
+# Container `moonshine` (1000) = the host service user, so /etc/moonshine,
+# the shared runtime volumes and the user bus line up. keep-groups passes on
+# the host user's render/wolf-input groups for the GPU and /dev/uinput, /dev/uhid.
+UserNS=keep-id:uid=1000,gid=1000
+GroupAdd=keep-groups
+DropCapability=ALL
+NoNewPrivileges=true
+# container_t plus the GPU nodes and the bus proxy's socket
+# (selinux/moonshine/moonshine_container.cil)
+SecurityLabelType=moonshine_container.process
+
+AddDevice=/dev/dri
+AddDevice=/dev/uinput
+AddDevice=/dev/uhid
+# NVIDIA device nodes only; userspace comes from the driver volume.
+# No nvidia-uvm-tools: it's for CUDA profilers, and labeled device_t.
+AddDevice=/dev/nvidia0
+AddDevice=/dev/nvidiactl
+AddDevice=/dev/nvidia-modeset
+AddDevice=/dev/nvidia-uvm
+Volume=/run/udev:/run/udev:ro
+Volume=nvidia-driver-vol:/usr/nvidia:ro
+
+# Config and the Steam launcher, read-only: systemd runs launch-steam on the
+# host, so the container must not be able to rewrite it (the bus proxy only
+# lets moonshine start that path). TLS key/cert and paired clients go in state/.
+# No :z: rootless podman can't relabel root's files, selinux/moonshine/moonshine.fc labels them.
+Volume=/etc/moonshine:/etc/moonshine:ro
+Volume=/etc/moonshine/state:/etc/moonshine/state
+# Shared with the app container at the same paths: Wayland + PulseAudio
+# sockets (XDG_RUNTIME_DIR) and Xwayland's X11 socket
+Volume=moonshine-runtime.volume:/run/moonshine
+Volume=moonshine-x11.volume:/tmp/.X11-unix
+# Read-only, for the Steam scanner (installed games, box art); same path as
+# in the Steam container
+Volume=moonshine-steam-home.volume:/home/retro:ro
+
+# Moonshine launches each app as a transient unit in the service user's
+# systemd manager (StartTransientUnit over the session bus); the app command
+# runs podman on the host. The real bus would let it run anything as the
+# service user, so it gets moonshine-bus-proxy instead, which only starts
+# and stops moonshine-session.service running /etc/moonshine/launch-steam.
+Volume=moonshine-bus.volume:/run/moonshine-bus
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/moonshine-bus/bus
+
+Environment=LD_LIBRARY_PATH=/usr/nvidia/lib
+Environment=__EGL_VENDOR_LIBRARY_DIRS=/usr/nvidia/share/glvnd/egl_vendor.d
+Environment=__EGL_EXTERNAL_PLATFORM_CONFIG_DIRS=/usr/nvidia/share/egl/egl_external_platform.d
+Environment=GBM_BACKENDS_PATH=/usr/nvidia/lib/gbm
+Environment=VK_DRIVER_FILES=/usr/nvidia/share/vulkan/icd.d/nvidia_icd.json
+# renderD128 is the NVIDIA card on this host (ls -l /sys/class/drm/renderD*/device/driver)
+Environment=MOONSHINE_RENDER_NODE=/dev/dri/renderD128
+
+# No [Install] section: start on demand.

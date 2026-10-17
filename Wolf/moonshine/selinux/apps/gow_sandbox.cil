@@ -1,0 +1,32 @@
+; App profile `sandboxed` (gos-plan.md 7.5, 9.9): gpu_container plus the mounts
+; bwrap and pressure-vessel make in their own namespaces, so Steam runs with no
+; capabilities. Replaces container_engine_t, which may mount any filesystem type.
+; The container also needs --security-opt unmask=/proc/* (T4, T5).
+;
+; Not yet run: finish it from the AVCs of a real launch (journalctl -g avc).
+;
+; Use: label=type:gow_sandbox.process
+(block gow_sandbox
+	(blockinherit gpu_container)
+
+	; A new procfs and devpts per sandbox, and read-only remounts (T2, T6)
+	(allow process proc_t (filesystem (mount remount unmount)))
+	(allow process devpts_t (filesystem (mount remount unmount)))
+	(allow process tmpfs_t (filesystem (remount)))
+	; bwrap's --dev-bind of the GPU nodes (on the host's devtmpfs) then a
+	; per-mount flags remount. Remounting devtmpfs itself still needs
+	; CAP_SYS_ADMIN in the init user namespace.
+	(allow process device_t (filesystem (remount)))
+	; bwrap's last step detaches the old root (the container's overlay,
+	; container_file_t) in its own mount namespace. Denied silently: the
+	; container policy has dontaudit svirt_sandbox_domain mountpoint unmount.
+	(allow process container_file_t (filesystem (unmount)))
+
+	; bwrap's new root and /dev are fresh tmpfs mounts it builds and binds into
+	(allow process tmpfs_t (dir (getattr open read search write add_name remove_name create mounton)))
+
+	; The new devpts: its ptmx and ptys
+	(allow process devpts_t (dir (getattr open read search)))
+	(allow process devpts_t (chr_file (getattr open read write ioctl)))
+	(allow process ptmx_t (chr_file (getattr open read write ioctl)))
+)

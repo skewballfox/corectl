@@ -32,7 +32,7 @@ Network=host
 # Rootless: run as the image's `wolf` user (uid/gid 990) and skip the GOW
 # root-only init + gosu. keep-id maps it to the host wolf user, so files in
 # /etc/wolf and the podman socket line up; keep-groups passes on the host
-# wolf user's render/input/video groups for device access.
+# wolf user's render/wolf-input groups for device access.
 Exec=--rootless
 UserNS=keep-id:uid=990,gid=990
 GroupAdd=keep-groups

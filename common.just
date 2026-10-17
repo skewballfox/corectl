@@ -242,7 +242,7 @@ create-sys-user USER groups=[] homedir="" quadlet="" : (ensure-groups groups)
         args+=("-G" "$GROUP_LIST")
     fi
     echo "${args[@]}"
-    {{ auth }} useradd "${args[@]}" "{{ USER }}"
+    {{ auth_shell }} useradd "${args[@]}" "{{ USER }}"
     
     
     {{ auth }} systemd-sysusers || true
@@ -320,7 +320,7 @@ ensure-groups groups=[]:
         # 3. Otherwise create brand new group
         else
             echo "Group '${group}' not found in /usr/lib/group. Creating with groupadd..."
-            {{ auth }} groupadd "${group}"
+            {{ auth_shell }} groupadd "${group}"
         fi
     done
 

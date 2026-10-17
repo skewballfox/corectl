@@ -19,16 +19,16 @@ escalation, so run them by hand from the repo root.
     verifies the secure-build GPG signature on the way in; the signature is
     carried over so the `containers-storage` `signedBy` rule accepts it.
   - `setup-udev`: installs `85-wolf.rules` from the fork (`/dev/uinput` +
-    `/dev/uhid` → group `input`, which `wolf` is in; `/dev/uhid` is currently
+    `/dev/uhid` → group `wolf-input` (rewritten from upstream's `input`), which `wolf` is in; `/dev/uhid` is currently
     `root 0600`).
   - `install`: `/etc/wolf` is now `wolf:wolf` (was `root:wolf 0750`, which Wolf
     can't write its config/certs/app state into).
   - `setup` runs `setup-udev` and `load-images` too.
-- `Wolf/wolf.container`:
+- `Wolf/wolf/wolf.container`:
   - `Image=localhost/gow/wolf:minimal`, `Exec=--rootless`.
   - `UserNS=keep-id:uid=990,gid=990`: container `wolf` (990) = host `wolf`, so
     `/etc/wolf` files and the podman socket line up.
-  - `GroupAdd=keep-groups`: passes on the host user's render/input/video groups
+  - `GroupAdd=keep-groups`: passes on the host user's render/wolf-input groups
     (they show up as `nogroup` inside, access still works).
   - NVIDIA via CDI (`AddDevice=nvidia.com/gpu=all`) instead of the device list +
     driver volume (its setup needs root). The volume is still passed to app
@@ -52,7 +52,7 @@ Not verified: anything needing the wolf user, uinput/uhid, a real stream.
 ```bash
 cd ~/Workspace/corectl   # on branch wolf/rootless-minimal
 
-# 1. udev rules, then check: crw-rw---- root input for both
+# 1. udev rules, then check: crw-rw---- root wolf-input for both
 run0 just wolf::setup-udev
 ls -l /dev/uinput /dev/uhid
 

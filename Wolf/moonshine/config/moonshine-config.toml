@@ -1,0 +1,38 @@
+# Moonshine config, installed as /etc/moonshine/config.toml.
+name = "Moonshine"
+address = "0.0.0.0"
+# Needs logind on the system bus + moonshine's polkit rule; neither is
+# reachable from the container
+inhibit_sleep = false
+
+[webserver]
+port = 47989
+port_https = 47984
+# In state/: the rest of /etc/moonshine is mounted read-only
+certificate = "/etc/moonshine/state/cert.pem"
+private_key = "/etc/moonshine/state/key.pem"
+
+[compositor]
+hdr = false
+# gamescope's -e: Steam drives the virtual connectors and window filtering
+steam_mode = true
+
+# Steam runs in its own container; see scripts/moonshine-launch-steam.sh for why the
+# command is a script in /etc/moonshine
+[[application]]
+title = "Steam"
+command = ["/etc/moonshine/launch-steam", "-bigpicture"]
+# The first start downloads and updates the Steam client
+launch_timeout_secs = 30
+stdout = "journal"
+stderr = "journal"
+
+# One app per installed game. Steam's home is mounted read-only into the
+# moonshine container at the same path as in the Steam container.
+[[application_scanner]]
+type = "steam"
+library = "/home/retro/.local/share/Steam"
+command = ["/etc/moonshine/launch-steam", "-bigpicture", "steam://rungameid/{game_id}"]
+launch_timeout_secs = 30
+stdout = "journal"
+stderr = "journal"
