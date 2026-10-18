@@ -1,0 +1,3 @@
+# Steam's home (client, library, settings) for the steam app container
+[Volume]
+VolumeName=moonshine-steam-home-vol

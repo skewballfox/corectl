@@ -1,0 +1,6 @@
+# Moonshine's XDG_RUNTIME_DIR (Wayland socket, moonshine/pulse/native),
+# mounted at /run/moonshine in moonshine.container and in the app container.
+# Created here, not on first use: a keep-id container that creates a volume
+# leaves its top dir owned by a subuid (see wolf/wolf-runtime.volume).
+[Volume]
+VolumeName=moonshine-runtime-vol

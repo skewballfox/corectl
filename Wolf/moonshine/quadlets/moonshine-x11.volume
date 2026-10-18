@@ -1,0 +1,4 @@
+# Xwayland's /tmp/.X11-unix (started by moonshine's compositor), shared with
+# the app container so X11 clients reach it through the filesystem socket.
+[Volume]
+VolumeName=moonshine-x11-vol

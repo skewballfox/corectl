@@ -1,0 +1,41 @@
+; A container type with GPU access for any vendor, built on container-selinux's
+; udica templates (/usr/share/udica/templates, loaded alongside this module).
+;
+; AMD and Intel GPUs are used through /dev/dri (dri_device_t), which every
+; container may open while container_use_dri_devices is on. NVIDIA's nodes
+; (/dev/nvidia*) are xserver_misc_device_t, which container_t only gets from
+; container_use_xserver_devices, for every container at once. This type gets
+; both itself, so that boolean stays off and only these types reach NVIDIA;
+; with container_use_dri_devices off too, only they reach any GPU.
+;
+; Use: SecurityLabelType=gpu_container.process (podman: label=type:gpu_container.process)
+(block gpu_container
+	(blockinherit container)
+	(blockinherit net_container)
+
+	; The rest of container_t's attributes (seinfo -t container_t -x), less
+	; corenet_unconfined_type (any network peer type; nvidia_container_t
+	; drops it too) and can_dump_kernel/can_receive_kernel_messages
+	(typeattributeset container_net_domain (process))
+	(typeattributeset corenet_unlabeled_type (process))
+	(typeattributeset kernel_system_state_reader (process))
+	(typeattributeset process_user_target (process))
+	(typeattributeset syslog_client_type (process))
+
+	; Render nodes (any vendor) and NVIDIA's control and device nodes
+	(allow process dri_device_t (chr_file (getattr open read write ioctl map)))
+	(allow process xserver_misc_device_t (chr_file (getattr open read write ioctl map append lock)))
+
+	; As for container_t: what it creates on its own tmpfs mounts is container_file_t
+	(typetransition process tmpfs_t dir container_file_t)
+	(typetransition process tmpfs_t file container_file_t)
+	(typetransition process tmpfs_t lnk_file container_file_t)
+
+	(allow systemd_coredump_t process (process (signull)))
+
+	; pasta (Network=pasta) reads the container's /proc entries
+	(optional gpu_container_pasta
+		(allow pasta_t process (dir (open read search)))
+		(allow pasta_t process (lnk_file (read)))
+	)
+)

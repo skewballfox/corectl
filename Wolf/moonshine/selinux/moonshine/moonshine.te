@@ -1,0 +1,32 @@
+policy_module(moonshine, 1.0.0)
+
+########################################
+#
+# moonshine-bus-proxy runs in its own domain so its socket carries a label
+# that the moonshine container can be allowed to connect to. Containers may
+# not connect to unconfined_t sockets, and allowing that would reach every
+# abstract socket on the host (moonshine shares the host network namespace).
+# The moonshine container's type grants the connect (moonshine_container.cil).
+#
+# The proxy is trusted host code holding the service user's real session
+# bus, so the domain itself is unconfined.
+
+gen_require(`
+	type unconfined_t;
+	role unconfined_r;
+	class dbus send_msg;
+')
+
+type moonshine_bus_t;
+domain_type(moonshine_bus_t)
+corecmd_bin_entry_type(moonshine_bus_t)
+unconfined_domain(moonshine_bus_t)
+role unconfined_r types moonshine_bus_t;
+
+# systemd --user starts the proxy with SELinuxContext= (and NoNewPrivileges=)
+allow unconfined_t moonshine_bus_t:process transition;
+allow unconfined_t moonshine_bus_t:process2 nnp_transition;
+
+# The proxy calls systemd --user over the session bus, and systemd replies
+allow moonshine_bus_t unconfined_t:dbus send_msg;
+allow unconfined_t moonshine_bus_t:dbus send_msg;

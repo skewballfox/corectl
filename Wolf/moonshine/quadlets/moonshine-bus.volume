@@ -1,0 +1,5 @@
+# Holds moonshine-bus-proxy's socket, mounted at /run/moonshine-bus in
+# moonshine.container. The volume's container_file_t label lets the container
+# reach the socket file; selinux/moonshine/moonshine.te lets it connect to the proxy.
+[Volume]
+VolumeName=moonshine-bus-vol

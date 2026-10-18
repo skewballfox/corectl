@@ -1,0 +1,18 @@
+# Installed in the service user's ~/.config/systemd/user. The moonshine
+# container's only D-Bus: filters its calls to systemd --user, see
+# scripts/moonshine-bus-proxy.py. The socket goes in moonshine-bus-vol, which
+# moonshine.container mounts at /run/moonshine-bus.
+[Unit]
+Description=Filtering D-Bus proxy for moonshine
+Requires=moonshine-bus-volume.service
+After=moonshine-bus-volume.service
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/moonshine-bus-proxy \
+    %h/.local/share/containers/storage/volumes/moonshine-bus-vol/_data/bus %t/bus
+# Its own domain (selinux/moonshine/moonshine.te): the one socket peer the container may connect to
+SELinuxContext=unconfined_u:unconfined_r:moonshine_bus_t:s0
+NoNewPrivileges=yes
+Restart=on-failure
+RestartSec=2

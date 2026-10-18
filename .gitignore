@@ -1,3 +1,4 @@
 *.priv
 *.pub
 *.ctx
+Wolf/moonshine/scripts/__pycache__
