@@ -12,7 +12,7 @@ ARG MOONSHINE_REF=patches
 # (EPEL doesn't fill them, it builds against full RHEL), so this is Fedora.
 
 ########################################################
-# Stage 1: build moonshine and the moonshine-wsi Vulkan layer
+# Stage 1: build moonshine and ferriscope's Vulkan WSI layer
 FROM $BASE_IMAGE AS builder
 # Build deps follow upstream CI (.github/actions/install-dependencies) and
 # nix/package.nix: inputtino-sys links libc++ and runs bindgen (libclang),
@@ -20,7 +20,7 @@ FROM $BASE_IMAGE AS builder
 RUN dnf -y install --setopt=install_weak_deps=False \
         git gcc gcc-c++ clang clang-devel cmake make rust cargo pkgconf-pkg-config \
         libcxx-devel libcxxabi-devel libdrm-devel libevdev-devel mesa-libgbm-devel \
-        opus-devel wayland-devel libxkbcommon-devel pulseaudio-libs-devel vulkan-loader-devel \
+        opus-devel wayland-devel libxkbcommon-devel pulseaudio-libs-devel vulkan-loader-devel jq \
     && dnf clean all
 
 ARG MOONSHINE_REPO
@@ -32,11 +32,12 @@ RUN test -n "$MOONSHINE_COMMIT" \
     && git clone --depth 1 --branch "$MOONSHINE_REF" "$MOONSHINE_REPO" /src \
     && test "$(git -C /src rev-parse HEAD)" = "$MOONSHINE_COMMIT"
 WORKDIR /src
-# --workspace also builds libmoonshine_wsi.so (a bare build skips it)
-RUN cargo build --release --locked --workspace \
+# The WSI layer lives in ferriscope (moonshine's compositor): install-wsi.sh
+# builds it from the ferriscope revision in Cargo.lock (cargo metadata, jq)
+# and installs /usr/lib/ferriscope/libferriscope_wsi.so plus its manifest
+RUN cargo build --release --locked \
     && install -Dm755 target/release/moonshine /out/usr/bin/moonshine \
-    && install -Dm755 target/release/libmoonshine_wsi.so /out/usr/lib/moonshine/vulkan-layers/libmoonshine_wsi.so \
-    && install -Dm644 dist/VkLayer_moonshine_wsi.json /out/usr/share/vulkan/implicit_layer.d/VkLayer_moonshine_wsi.json
+    && DESTDIR=/out dist/install-wsi.sh --prefix /usr
 
 ########################################################
 # Stage 2: runtime

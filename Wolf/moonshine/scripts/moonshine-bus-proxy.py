@@ -47,13 +47,16 @@ class Policy:
 # BASH_ENV, PATH, XDG_CONFIG_HOME for containers.conf, ...) is refused.
 ENV_NAMES = frozenset({
     "PULSE_SERVER", "PULSE_RUNTIME_PATH", "DISPLAY", "WAYLAND_DISPLAY",
-    "MOONSHINE_WAYLAND_DISPLAY", "ENABLE_MOONSHINE_WSI", "MOONSHINE_HDR", "DXVK_HDR",
+    "ENABLE_FERRISCOPE_WSI", "DISABLE_GAMESCOPE_WSI", "DXVK_HDR",
     "PROTON_USE_PIPEWIRE", "XDG_CURRENT_DESKTOP", "GAMESCOPE_WAYLAND_DISPLAY",
     "STEAM_GAME_DISPLAY_0", "STEAM_GAMESCOPE_DYNAMIC_FPSLIMITER",
-    "STEAM_GAMESCOPE_FANCY_SCALING_SUPPORT", "STEAM_GAMESCOPE_NIS_SUPPORTED",
-    "STEAM_GAMESCOPE_VRR_SUPPORTED", "STEAM_GAMESCOPE_HDR_SUPPORTED",
+    "STEAM_GAMESCOPE_HDR_SUPPORTED",
     "MOONSHINE_CLIENT_WIDTH", "MOONSHINE_CLIENT_HEIGHT", "MOONSHINE_CLIENT_FRAMERATE",
 })
+# Variables moonshine sets that are only allowed with one value. Ferriscope
+# adds its runtime dir, which podman on the host would take as its own:
+# launch-steam resets it, and any other value is refused.
+ENV_VALUES = {"XDG_RUNTIME_DIR": "/run/moonshine"}
 
 METHOD_CALL, METHOD_RETURN, ERROR, SIGNAL = 1, 2, 3, 4
 NO_REPLY_EXPECTED = 0x1
@@ -285,9 +288,14 @@ def error_reply(call: Message, serial: int, reason: str) -> bytes:
 
 def check_environment(entries: list) -> None:
     for entry in entries:
-        name, sep, _ = entry.partition("=")
-        if not sep or name not in ENV_NAMES:
-            raise Refused(f"environment variable {name!r}")
+        name, sep, value = entry.partition("=")
+        match sep, ENV_VALUES.get(name):
+            case "=", None if name in ENV_NAMES:
+                continue
+            case "=", fixed if value == fixed:
+                continue
+            case _:
+                raise Refused(f"environment variable {name!r}")
 
 
 def check_transient_unit(name: str, mode: str, properties: list, aux: list) -> None:

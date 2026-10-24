@@ -57,6 +57,11 @@ Volume=moonshine-x11.volume:/tmp/.X11-unix
 # Read-only, for the Steam scanner (installed games, box art); same path as
 # in the Steam container
 Volume=moonshine-steam-home.volume:/home/retro:ro
+# The scanner follows Steam's libraryfolders.vdf to the games disks' libraries.
+# :ro covers only this bind, not the disks mounted under it: moonshine_games_t
+# is what keeps them read-only here (selinux/moonshine/moonshine.te). Disks
+# mounted after moonshine starts show up on its next start.
+Volume=/var/mnt/games:/mnt/games:ro
 
 # Moonshine launches each app as a transient unit in the service user's
 # systemd manager (StartTransientUnit over the session bus); the app command

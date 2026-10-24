@@ -34,11 +34,11 @@ RUN dnf -y install --setopt=install_weak_deps=False \
 RUN dnf -y install --setopt=install_weak_deps=False diffutils util-linux pciutils \
     && dnf clean all
 
-# Route Vulkan presentation into moonshine's compositor (enabled by the
-# ENABLE_MOONSHINE_WSI=1 that moonshine sets for its apps). x86_64 only:
-# 32-bit Vulkan games fall back to Xwayland.
-COPY --from=moonshine /usr/lib/moonshine/vulkan-layers/libmoonshine_wsi.so /usr/lib/moonshine/vulkan-layers/
-COPY --from=moonshine /usr/share/vulkan/implicit_layer.d/VkLayer_moonshine_wsi.json /usr/share/vulkan/implicit_layer.d/
+# Route Vulkan presentation into moonshine's compositor, ferriscope (enabled
+# by the ENABLE_FERRISCOPE_WSI=1 that moonshine sets for its apps). x86_64
+# only: 32-bit Vulkan games fall back to Xwayland.
+COPY --from=moonshine /usr/lib/ferriscope/libferriscope_wsi.so /usr/lib/ferriscope/
+COPY --from=moonshine /usr/share/vulkan/implicit_layer.d/VkLayer_FERRISCOPE_wsi.x86_64.json /usr/share/vulkan/implicit_layer.d/
 
 COPY --chmod=755 scripts/steam-entrypoint.sh /usr/local/bin/steam-entrypoint
 

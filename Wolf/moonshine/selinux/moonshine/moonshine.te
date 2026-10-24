@@ -15,6 +15,7 @@ gen_require(`
 	type unconfined_t;
 	role unconfined_r;
 	class dbus send_msg;
+	class filesystem associate;
 ')
 
 type moonshine_bus_t;
@@ -30,3 +31,21 @@ allow unconfined_t moonshine_bus_t:process2 nnp_transition;
 # The proxy calls systemd --user over the session bus, and systemd replies
 allow moonshine_bus_t unconfined_t:dbus send_msg;
 allow unconfined_t moonshine_bus_t:dbus send_msg;
+
+########################################
+#
+# Game libraries: /var/mnt/games (moonshine.fc) and every disk mounted under
+# it with context=system_u:object_r:moonshine_games_t:s0. The Steam container
+# may write them (gow_sandbox.cil), moonshine's may only read them
+# (moonshine_container.cil). Both bind /var/mnt/games, and podman's :ro covers
+# only the bind itself, not the disks mounted under it, so this type is what
+# keeps moonshine read-only there. container_file_t would not: every
+# container type may write it.
+#
+# The attributes container_file_t has for the same use: a file type that is
+# also a filesystem's label (context=) and a mountpoint.
+
+type moonshine_games_t;
+files_mountpoint(moonshine_games_t)
+fs_noxattr_type(moonshine_games_t)
+allow moonshine_games_t self:filesystem associate;

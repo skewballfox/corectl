@@ -1,0 +1,25 @@
+[Unit]
+Description=Headless X server for Steam between streams (moonshine)
+
+[Service]
+Restart=on-failure
+RestartSec=5
+
+[Container]
+ContainerName=%p
+Image=localhost/moonshine/xvfb:latest
+# Display :99, apart from Xwayland's in moonshine-x11-vol. No TCP; the
+# abstract socket doesn't leave this network namespace (Network=none), so
+# Steam connects through the filesystem one in the volume.
+Exec=:99 -screen 0 1920x1080x24 -nolisten tcp
+# Same user as the Steam container's retro (1000 = the service user), which
+# owns the socket
+UserNS=keep-id:uid=1000,gid=1000
+DropCapability=ALL
+NoNewPrivileges=true
+# container_t's own files plus Steam's connect (selinux/apps/xvfb.cil)
+SecurityLabelType=moonshine_xvfb.process
+Network=none
+Volume=moonshine-xvfb.volume:/tmp/.X11-unix
+
+# No [Install] section: launch-steam starts it when Steam runs without a stream.

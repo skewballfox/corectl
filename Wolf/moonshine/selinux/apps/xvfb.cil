@@ -1,0 +1,19 @@
+; Xvfb's container (quadlets/moonshine-xvfb.container): container_t's files,
+; no network, no devices. Its own type only so the Steam container can be
+; allowed to connect to its X socket: allowing that for container_t would
+; reach every container's sockets.
+;
+; Use: SecurityLabelType=moonshine_xvfb.process
+(block moonshine_xvfb
+	(blockinherit container)
+
+	(typetransition process tmpfs_t dir container_file_t)
+	(typetransition process tmpfs_t file container_file_t)
+	(typetransition process tmpfs_t lnk_file container_file_t)
+
+	(allow systemd_coredump_t process (process (signull)))
+
+	; Steam between streams (moonshine-launch-steam.sh). Only connectto: no
+	; file, dir or process access to Xvfb.
+	(allow gow_sandbox.process process (unix_stream_socket (connectto)))
+)

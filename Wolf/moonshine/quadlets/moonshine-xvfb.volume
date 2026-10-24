@@ -1,0 +1,6 @@
+# Xvfb's /tmp/.X11-unix (moonshine-xvfb.container), mounted there in the Steam
+# container instead of moonshine-x11-vol when no stream is running.
+# Created here, not on first use: a keep-id container that creates a volume
+# leaves its top dir owned by a subuid (see moonshine-runtime.volume).
+[Volume]
+VolumeName=moonshine-xvfb-vol
