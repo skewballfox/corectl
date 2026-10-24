@@ -29,4 +29,21 @@
 	(allow process devpts_t (dir (getattr open read search)))
 	(allow process devpts_t (chr_file (getattr open read write ioctl)))
 	(allow process ptmx_t (chr_file (getattr open read write ioctl)))
+
+	; The game libraries (moonshine.te's moonshine_games_t): what
+	; container_file_t gets, less relabeling and entrypoint. Steam installs and
+	; updates games there, Proton keeps its prefixes there, games run from
+	; there; bwrap remounts its binds of them.
+	(allow process moonshine_games_t (filesystem (getattr remount)))
+	(allow process moonshine_games_t (dir (getattr open read search write add_name remove_name
+		create rmdir rename reparent link setattr lock ioctl watch watch_reads)))
+	(allow process moonshine_games_t (file (getattr open read write append create unlink rename
+		link setattr lock ioctl map execute execute_no_trans execmod watch watch_reads)))
+	(allow process moonshine_games_t (lnk_file (getattr read write append create unlink rename
+		link setattr lock ioctl watch watch_reads)))
+
+	; moonshine's virtual pads in the bound /dev/input (launch-steam): read for
+	; input, write and ioctl for rumble. All of the host's input nodes have
+	; this type, so file mode decides: only the pads are wolf-input.
+	(allow process event_device_t (chr_file (getattr open read write ioctl)))
 )

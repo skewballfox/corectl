@@ -1,3 +1,8 @@
 # Moonshine config, launcher and state, mounted into the moonshine container.
 # Labeled here: rootless podman cannot relabel (:z) the root-owned files.
 /etc/moonshine(/.*)?	gen_context(system_u:object_r:container_file_t,s0)
+# Where the games disks are mounted, and their mountpoints (moonshine.te).
+# The disks' own files take the type from their context= mount option.
+# Written as /mnt: file_contexts.subs_dist maps /var/mnt to /mnt before
+# matching, so a /var/mnt rule never matches.
+/mnt/games(/.*)?	gen_context(system_u:object_r:moonshine_games_t,s0)

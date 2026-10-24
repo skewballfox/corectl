@@ -12,6 +12,7 @@ moonshine_repo := "https://github.com/skewballfox/moonshine.git"
 moonshine_ref := "patches"
 moonshine_tag := "moonshine/moonshine:" + moonshine_ref
 steam_tag := "moonshine/steam:latest"
+xvfb_tag := "moonshine/xvfb:latest"
 
 svc_home := "/var/home/wolf"
 quadlet_dir := svc_home + "/.config/containers/systemd"
@@ -38,17 +39,26 @@ build-steam ref=moonshine_ref:
         -o "{{ container-store }}/wolf" \
         -b "MOONSHINE_IMAGE=localhost/moonshine/moonshine:{{ ref }}"
 
-# NVIDIA driver volume image, moonshine, then Steam
+# Headless X server for Steam between streams (moonshine-xvfb.container)
+[working-directory('moonshine')]
+build-xvfb:
+    just build-and-sign "{{ xvfb_tag }}" \
+        -f xvfb.Dockerfile \
+        -o "{{ container-store }}/wolf"
+
+# NVIDIA driver volume image, moonshine, Steam, then Xvfb
 build-containers:
     just wolf::build-nvidia-driver
     just moonshine::build-moonshine
     just moonshine::build-steam
+    just moonshine::build-xvfb
 
 # Copy the signed images into the wolf user's storage (see wolf::load-image)
 load-images:
     just wolf::load-image gow/nvidia-driver:latest
     just wolf::load-image {{ moonshine_tag }}
     just wolf::load-image {{ steam_tag }}
+    just wolf::load-image {{ xvfb_tag }}
 
 # Moonshine's video/control/audio ports differ from Wolf's (47998-48000 udp)
 setup-firewall:
@@ -64,13 +74,17 @@ setup-firewall:
 # desktop session. Every uinput and uhid device goes to seat9 instead, which
 # also takes other virtual devices (input remappers, Bluetooth LE HID, which
 # bluez creates through uhid) off the desktop seat.
-# Only /dev/uinput and /dev/uhid go to wolf::input_group (wolf-input).
-# The input and hidraw nodes keep the default root:input: moonshine writes
-# through the uinput/uhid handles and never opens them, and wolf-input on
-# them would let wolf read remapper output and Bluetooth LE keyboards.
+# /dev/uinput and /dev/uhid go to wolf::input_group (wolf-input), and so do
+# the input nodes of moonshine's pads (named "Moonshine <kind> controller";
+# the PS5 driver adds "... Motion Sensors" and "... Touchpad"), which the
+# Steam container reads through keep-groups. The name match is enough here:
+# a device that fakes it was made through uinput/uhid, i.e. by wolf. Other
+# input nodes keep the default root:input, and hidraw nodes root:root, since
+# wolf-input on them would let wolf read remapper output and Bluetooth LE
+# keyboards.
 # run0 can't exec udevadm on secureblue (see wolf::setup-udev), so the uevents
 # are replayed instead; udevd picks up the new rules on its own.
-# udev rules: /dev/uinput + /dev/uhid for wolf-input, all virtual input devices on seat9
+# udev rules: /dev/uinput, /dev/uhid and moonshine's pads for wolf-input, all virtual input devices on seat9
 setup-udev:
     just wolf::setup-input-group
     {{ auth }} install -m 0644 moonshine/udev/85-moonshine.rules /etc/udev/rules.d/85-moonshine.rules
@@ -100,6 +114,21 @@ setup-selinux:
     make -s -C "$build" -f /usr/share/selinux/devel/Makefile moonshine.pp
     {{ auth_shell }} semodule -i "$build/moonshine.pp" "$build"/*.cil
 
+# One disk per call, e.g. `just moonshine add-games-disk ssd /dev/sdc1`.
+# Steam and moonshine bind all of /var/mnt/games, so every disk mounted there
+# is a library. Needs setup-selinux first (the mount's context= type).
+# Mount options follow the filesystem (btrfs, ext4, xfs) and the disk (hard
+# disk, SATA SSD, NVMe); the script says why. `src`: an existing Steam
+# library on the disk (the directory holding steamapps/, relative to its top
+# level), used in place. Re-running is safe and applies changed options.
+# The library is then added to Steam's libraryfolders.vdf (Big Picture can't
+# add it): that needs Steam installed and stopped, and the script says when
+# to rerun. A Steam started before the mount doesn't see the disk anyway.
+# Games disk: mounted at /var/mnt/games/<name> with options for its filesystem and disk, added to Steam
+add-games-disk name device src="":
+    {{ auth_shell }} bash {{ module_directory() }}/moonshine/scripts/games-disk.sh {{ quote(name) }} {{ quote(device) }} {{ if src == "" { "" } else { quote(src) } }}
+    {{ auth_shell }} bash {{ module_directory() }}/moonshine/scripts/steam-library.sh {{ quote(name) }} "{{ svc_home }}/.local/share/containers/storage/volumes/moonshine-steam-home-vol/_data/.local/share/Steam"
+
 # Only what was just installed is chowned: a recursive chown of the home would
 # flatten the subuid ownership inside the rootless image store. The bus proxy
 # is root's, outside anything the service user or a container can write.
@@ -115,7 +144,8 @@ install:
     {{ auth }} mkdir -p "{{ quadlet_dir }}" "{{ svc_home }}/.config/systemd/user"
     {{ auth }} cp moonshine/quadlets/moonshine.container moonshine/quadlets/moonshine-runtime.volume \
         moonshine/quadlets/moonshine-x11.volume moonshine/quadlets/moonshine-steam-home.volume \
-        moonshine/quadlets/moonshine-bus.volume nvidia-driver.volume "{{ quadlet_dir }}/"
+        moonshine/quadlets/moonshine-bus.volume moonshine/quadlets/moonshine-xvfb.container \
+        moonshine/quadlets/moonshine-xvfb.volume nvidia-driver.volume "{{ quadlet_dir }}/"
     {{ auth }} cp moonshine/quadlets/moonshine-bus-proxy.service "{{ svc_home }}/.config/systemd/user/"
     {{ auth }} cp container_conf.toml "{{ svc_home }}/{{ user_storage }}"
     {{ auth }} chown -R wolf:wolf "{{ svc_home }}/.config"
@@ -126,6 +156,8 @@ install:
     {{ auth }} install -o root -g wolf -m 0750 moonshine/scripts/moonshine-launch-steam.sh /etc/moonshine/launch-steam
     {{ auth }} find /etc/moonshine -maxdepth 1 \( -name cert.pem -o -name key.pem \) -exec mv -n -t /etc/moonshine/state {} +
     {{ auth_shell }} restorecon -RF /etc/moonshine
+    {{ auth }} install -d -m 0755 /var/mnt/games
+    {{ auth_shell }} restorecon -F /var/mnt/games
     {{ ctl }} daemon-reload
     -{{ ctl }} stop nvidia-driver-volume.service
     just wolf::rm-volume nvidia-driver-vol
@@ -136,16 +168,46 @@ setup: setup-udev setup-firewall setup-selinux build-containers install load-ima
 # Start moonshine; stops the Wolf stack first, which uses the same ports
 start:
     -{{ ctl }} stop wolf.service pulseaudio.service
-    -{{ ctl }} reset-failed moonshine.service moonshine-bus-proxy.service nvidia-driver-volume.service moonshine-runtime-volume.service moonshine-x11-volume.service moonshine-steam-home-volume.service moonshine-bus-volume.service
+    -{{ ctl }} reset-failed 'moonshine*.service' 'nvidia-driver-*.service'
+    just moonshine::rm-stale-steam
     {{ ctl }} start moonshine.service
 
 # Stop moonshine, its running app (the transient unit it started) and the bus proxy
 stop:
     -{{ ctl }} stop moonshine-session.service
+    -just moonshine::rm-stale-steam
     {{ ctl }} stop moonshine.service moonshine-bus-proxy.service
+
+# A session's Steam (--pid=container:moonshine) that its stop killed before
+# podman's --rm cleanup still depends on moonshine, and podman then can't
+# replace or remove the moonshine container. With conmon killed, podman may
+# still list it as running, so it's matched by that PID namespace instead:
+# called with the session stopped, it can't be a live one. Steam between
+# streams (update-steam) has its own namespace and stays.
+[private]
+rm-stale-steam:
+    {{ shell_as("wolf") }} "$(printf '%q ' env XDG_RUNTIME_DIR="/run/user/$(id -u wolf)" sh -c \
+        'for c in $(podman ps -aq --filter name=^moonshine-steam$); do case $(podman inspect --format "{{{{.HostConfig.PidMode}}" "$c") in container:*) podman rm -f "$c" ;; esac; done')"
 
 status:
     -{{ ctl }} status --no-pager moonshine.service moonshine-bus-proxy.service moonshine-session.service
+
+# While the Steam client updates it draws nothing, so Moonlight gets no video
+# and drops the stream before the update is done. This runs the launcher
+# outside a stream: same container and confinement, but with no moonshine
+# session it gets Xvfb's display (moonshine-xvfb.container), so after its
+# update Steam logs in and works through its downloads. Follow the client
+# update with `just moonshine steam-log`. Runs until Ctrl-C or a stream, which
+# stops it and starts Steam for the stream; does nothing if Steam is running.
+# Doesn't need moonshine running.
+# Run Steam between streams: client update, then game downloads
+update-steam:
+    {{ shell_as("wolf") }} "$(printf '%q ' env XDG_RUNTIME_DIR="/run/user/$(id -u wolf)" /etc/moonshine/launch-steam)"
+
+# Steam writes its update progress here rather than to stdout
+# Follow Steam's bootstrap (update) log
+steam-log:
+    {{ auth }} tail -n 20 -F "{{ svc_home }}/.local/share/containers/storage/volumes/moonshine-steam-home-vol/_data/.local/share/Steam/logs/bootstrap_log.txt"
 
 # Needs no root: the journal is readable unprivileged here. USER_UNIT adds the
 # user manager's own lines (start, exit status, restart limit). AVC records

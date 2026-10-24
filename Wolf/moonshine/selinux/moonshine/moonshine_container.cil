@@ -25,4 +25,11 @@
 	; nodes in the quadlet's AddDevice= exist in the container.
 	(allow process event_device_t (chr_file (getattr open read write ioctl)))
 	(allow process uhid_device_t (chr_file (getattr open read write ioctl)))
+
+	; The Steam scanner reads the game libraries' manifests (libraryfolders.vdf,
+	; appmanifest_*.acf). Read-only: Steam's container installs the games, and
+	; write access to them would be code execution in it.
+	(allow process moonshine_games_t (dir (getattr open read search)))
+	(allow process moonshine_games_t (file (getattr open read)))
+	(allow process moonshine_games_t (lnk_file (getattr read)))
 )

@@ -2,3 +2,6 @@
 *.pub
 *.ctx
 Wolf/moonshine/scripts/__pycache__
+docs/experiments/
+Wolf/moonshine/sessionbusnotes.md
+Wolf/moonshine/steamsecretsnotes.md
